@@ -1,12 +1,35 @@
-import { holdings, inr, num, signed } from "@/data/market";
+import { useQuery } from "@tanstack/react-query";
+
+import { positions, inr } from "@/data/market";
+import { quotesQuery } from "@/lib/market-queries";
+import { num, signed, stripSuffix } from "@/lib/market-types";
 import { Delta } from "./Delta";
+import { StatTile } from "./StatTile";
 import { cn } from "@/lib/utils";
 
 export function Portfolio() {
-  const invested = holdings.reduce((sum, h) => sum + h.avgPrice * h.quantity, 0);
-  const current = holdings.reduce((sum, h) => sum + h.ltp * h.quantity, 0);
-  const pnl = current - invested;
-  const pnlPercent = (pnl / invested) * 100;
+  const symbols = positions.map((p) => p.symbol);
+  const { data } = useQuery(quotesQuery(symbols));
+
+  const rows = positions.map((position) => {
+    const ltp = data?.find((q) => q.symbol === position.symbol)?.price ?? null;
+    const invested = position.avgPrice * position.quantity;
+    const current = ltp === null ? null : ltp * position.quantity;
+    return {
+      ...position,
+      ltp,
+      invested,
+      current,
+      gain: current === null ? null : current - invested,
+      gainPct: ltp === null ? null : ((ltp - position.avgPrice) / position.avgPrice) * 100,
+    };
+  });
+
+  const invested = rows.reduce((sum, r) => sum + r.invested, 0);
+  const priced = rows.every((r) => r.current !== null);
+  const current = priced ? rows.reduce((sum, r) => sum + (r.current ?? 0), 0) : null;
+  const pnl = current === null ? null : current - invested;
+  const pnlPercent = pnl === null ? null : (pnl / invested) * 100;
 
   return (
     <section className="panel p-4 sm:p-5" aria-label="Portfolio">
@@ -16,12 +39,12 @@ export function Portfolio() {
       </header>
 
       <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <Stat label="Current value" value={inr(current, 0)} />
-        <Stat label="Invested" value={inr(invested, 0)} />
-        <Stat
+        <StatTile label="Current value" value={current === null ? "—" : inr(current, 0)} />
+        <StatTile label="Invested" value={inr(invested, 0)} />
+        <StatTile
           label="Overall P&L"
-          value={`${pnl >= 0 ? "+" : "−"}${inr(Math.abs(pnl), 0)}`}
-          tone={pnl >= 0 ? "bull" : "bear"}
+          value={pnl === null ? "—" : `${pnl >= 0 ? "+" : "−"}${inr(Math.abs(pnl), 0)}`}
+          tone={pnl === null ? undefined : pnl >= 0 ? "bull" : "bear"}
         />
       </div>
 
@@ -37,60 +60,33 @@ export function Portfolio() {
             </tr>
           </thead>
           <tbody>
-            {holdings.map((h) => {
-              const gain = (h.ltp - h.avgPrice) * h.quantity;
-              const gainPct = ((h.ltp - h.avgPrice) / h.avgPrice) * 100;
-              return (
-                <tr key={h.symbol} className="bg-surface-2/50">
-                  <td className="rounded-l-lg px-3 py-2.5">
-                    <p className="font-semibold">{h.symbol}</p>
-                    <p className="truncate text-xs text-muted-foreground">{h.name}</p>
-                  </td>
-                  <td className="num px-2 text-right">{h.quantity}</td>
-                  <td className="num px-2 text-right text-muted-foreground">{num(h.avgPrice)}</td>
-                  <td className="num px-2 text-right">{num(h.ltp)}</td>
-                  <td
-                    className={cn(
-                      "num rounded-r-lg px-3 text-right font-semibold",
-                      gain >= 0 ? "text-bull" : "text-bear",
-                    )}
-                  >
-                    {signed(gain, 0)}
-                    <span className="block text-[11px] font-medium opacity-80">
-                      {signed(gainPct)}%
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
+            {rows.map((row) => (
+              <tr key={row.symbol} className="bg-surface-2/50">
+                <td className="rounded-l-lg px-3 py-2.5">
+                  <p className="font-semibold">{stripSuffix(row.symbol)}</p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {data?.find((q) => q.symbol === row.symbol)?.name ?? "—"}
+                  </p>
+                </td>
+                <td className="num px-2 text-right">{row.quantity}</td>
+                <td className="num px-2 text-right text-muted-foreground">{num(row.avgPrice)}</td>
+                <td className="num px-2 text-right">{num(row.ltp)}</td>
+                <td
+                  className={cn(
+                    "num rounded-r-lg px-3 text-right font-semibold",
+                    row.gain === null ? "text-muted-foreground" : row.gain >= 0 ? "text-bull" : "text-bear",
+                  )}
+                >
+                  {signed(row.gain, 0)}
+                  <span className="block text-[11px] font-medium opacity-80">
+                    {row.gainPct === null ? "" : `${signed(row.gainPct)}%`}
+                  </span>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
     </section>
-  );
-}
-
-function Stat({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: string;
-  tone?: "bull" | "bear";
-}) {
-  return (
-    <div className="rounded-xl bg-surface-2/60 p-3">
-      <p className="text-[11px] tracking-wider text-muted-foreground uppercase">{label}</p>
-      <p
-        className={cn(
-          "num mt-1 truncate text-base font-bold sm:text-lg",
-          tone === "bull" && "text-bull",
-          tone === "bear" && "text-bear",
-        )}
-      >
-        {value}
-      </p>
-    </div>
   );
 }
