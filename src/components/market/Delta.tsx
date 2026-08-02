@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import { signed } from "@/data/market";
+import { signed } from "@/lib/market-types";
 import { TrendingDown, TrendingUp } from "lucide-react";
 
 export function Delta({
@@ -8,11 +8,15 @@ export function Delta({
   className,
   showIcon = true,
 }: {
-  change?: number;
-  changePercent: number;
+  change?: number | null;
+  changePercent: number | null | undefined;
   className?: string;
   showIcon?: boolean;
 }) {
+  if (changePercent === null || changePercent === undefined) {
+    return <span className={cn("num text-xs text-muted-foreground", className)}>—</span>;
+  }
+
   const up = changePercent >= 0;
   const Icon = up ? TrendingUp : TrendingDown;
 
@@ -25,7 +29,7 @@ export function Delta({
       )}
     >
       {showIcon && <Icon className="h-3.5 w-3.5 shrink-0" />}
-      {change !== undefined && <span>{signed(change)}</span>}
+      {change !== undefined && change !== null && <span>{signed(change)}</span>}
       <span>({signed(changePercent)}%)</span>
     </span>
   );
