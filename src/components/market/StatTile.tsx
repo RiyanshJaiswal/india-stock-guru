@@ -9,7 +9,7 @@ export function StatTile({
 }: {
   label: string;
   value: string;
-  tone?: "bull" | "bear";
+  tone?: "bull" | "bear" | undefined;
   className?: string;
 }) {
   return (
