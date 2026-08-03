@@ -13,6 +13,7 @@ import {
   type Quote,
   type SearchResult,
 } from "./market-types";
+import type { Candle, Interval, Range } from "./technical-types";
 
 const BASE = "https://query2.finance.yahoo.com";
 const UA =
@@ -119,3 +120,70 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
   const body = (await res.json()) as { quoteResponse?: { result?: RawQuote[] } };
   return (body.quoteResponse?.result ?? []).map(toQuote);
 }
+
+/** Historical OHLCV candles used by the technical analysis engine. */
+export async function providerHistory(
+  symbol: string,
+  interval: Interval = "1d",
+  range: Range = "1y",
+): Promise<Candle[]> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
+  const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } });
+  if (!res.ok) throw new Error(`History fetch failed (${res.status})`);
+
+  const body = (await res.json()) as {
+    chart?: {
+      error?: { description?: string } | null;
+      result?: {
+        timestamp?: number[];
+        indicators?: {
+          quote?: {
+            open?: (number | null)[];
+            high?: (number | null)[];
+            low?: (number | null)[];
+            close?: (number | null)[];
+            volume?: (number | null)[];
+          }[];
+        };
+      }[];
+    };
+  };
+
+  if (body.chart?.error) {
+    throw new Error(body.chart.error.description ?? "History provider error");
+  }
+
+  const result = body.chart?.result?.[0];
+  const timestamps = result?.timestamp ?? [];
+  const quote = result?.indicators?.quote?.[0];
+  if (!quote || timestamps.length === 0) return [];
+
+  const candles: Candle[] = [];
+  for (let i = 0; i < timestamps.length; i += 1) {
+    const open = quote.open?.[i];
+    const high = quote.high?.[i];
+    const low = quote.low?.[i];
+    const close = quote.close?.[i];
+    const volume = quote.volume?.[i];
+    const time = timestamps[i];
+    if (
+      time === undefined ||
+      typeof open !== "number" ||
+      typeof high !== "number" ||
+      typeof low !== "number" ||
+      typeof close !== "number"
+    ) {
+      continue;
+    }
+    candles.push({
+      time: time * 1000,
+      open,
+      high,
+      low,
+      close,
+      volume: typeof volume === "number" ? volume : 0,
+    });
+  }
+  return candles;
+}
+
