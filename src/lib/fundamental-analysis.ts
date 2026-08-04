@@ -202,12 +202,18 @@ export function buildFundamentalAnalysis(
     coverage: buildCoverage(snapshot),
   };
 
-  // Derived book value per share is rounded already; keep P/B consistent when
-  // the provider omits it but we can compute it from a live market cap.
-  if (analysis.valuation.pbRatio === null && bvps !== null && shares !== null) {
+  // Fill P/B only when the provider omits it and the per-share figure is in
+  // the same currency as the listing — never mix currencies.
+  if (
+    analysis.valuation.pbRatio === null &&
+    bvps !== null &&
+    shares !== null &&
+    currencyMatches
+  ) {
     const priceImplied = divide(stats.marketCap, shares);
     if (priceImplied !== null) analysis.valuation.pbRatio = round(priceImplied / bvps);
   }
+
 
   return analysis;
 }
