@@ -144,13 +144,16 @@ export function buildFundamentalAnalysis(
       evToEbitda: stats.evToEbitda,
       evToRevenue: stats.evToRevenue,
       bookValuePerShare: bvps,
-      epsBasicTTM: stats.epsBasicTTM ?? sumTrailing(
-        quarterlyProfitAndLoss.map((row) => row.basicEps),
-        4,
-      ),
+      epsBasicTTM:
+        stats.epsBasicTTM ??
+        (currencyMatches
+          ? sumTrailing(quarterlyProfitAndLoss.map((row) => row.basicEps), 4)
+          : null),
       epsDilutedTTM:
-        sumTrailing(quarterlyProfitAndLoss.map((row) => row.dilutedEps), 4) ??
-        stats.epsDilutedTTM,
+        (currencyMatches
+          ? sumTrailing(quarterlyProfitAndLoss.map((row) => row.dilutedEps), 4)
+          : null) ?? stats.epsDilutedTTM,
+
     },
     profitability: {
       roe: pick(returnOnEquity(netIncomeTTM, equity), stats.returnOnEquity),
