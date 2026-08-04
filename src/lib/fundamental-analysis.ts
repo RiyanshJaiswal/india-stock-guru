@@ -114,8 +114,20 @@ export function buildFundamentalAnalysis(
   const seriesCagr = (series: Money[], years: number): Percent =>
     series.length > years ? cagr(series[0] ?? null, series[years] ?? null, years) : null;
 
+  // Statements can be filed in a different currency than the listing (Yahoo
+  // reports Indian ADR-style filings in USD). Per-share figures are only
+  // derived when both sides agree; otherwise the provider's value is used.
+  const statementCurrency = latestBalance?.currency ?? latestAnnualPl?.currency ?? null;
+  const currencyMatches =
+    statementCurrency !== null &&
+    snapshot.profile.currency !== null &&
+    statementCurrency === snapshot.profile.currency;
+
   const bvps =
-    bookValuePerShare(equity, shares) ?? stats.bookValuePerShare ?? null;
+    (currencyMatches ? bookValuePerShare(equity, shares) : null) ??
+    stats.bookValuePerShare ??
+    null;
+
 
   const analysis: FundamentalAnalysis = {
     symbol: snapshot.symbol,
