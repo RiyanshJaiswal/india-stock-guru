@@ -151,15 +151,6 @@ const RULES: Rule[] = [
   { type: "agm-egm", patterns: [/\b(agm|egm|extra-?ordinary\s+general\s+meeting|annual\s+general\s+meeting)\b/i] },
 ];
 
-/** Relative importance weight per event type (0-1). */
-const EVENT_WEIGHT: Record<EventType, number> = {
-  earnings: 1,
-  merger: 0.95,
-  acquisition: 0.9,
-  guidance: 0.88,
-  regulatory: 0.85,
-  promoter-activity_placeholder_unused as never,
-} as never;
 
 export type Classification = {
   eventTypes: EventType[];
