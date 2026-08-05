@@ -22,12 +22,15 @@ import {
 const GOOGLE_NEWS = "https://news.google.com/rss/search";
 
 function buildQuery(query: NewsQuery, site: string | null): string {
-  const terms = [query.query ?? query.ticker ?? "Indian stock market"];
-  if (query.ticker && query.query && !query.query.includes(query.ticker)) {
-    terms.push(query.ticker);
-  }
-  const base = terms.join(" ");
+  const name = query.query ?? query.ticker;
+  // Phrase-quote the company so publisher-scoped feeds stay on-topic.
+  const base = name
+    ? query.ticker && !name.toUpperCase().includes(query.ticker)
+      ? `("${name}" OR "${query.ticker}")`
+      : `"${name}"`
+    : "Indian stock market";
   return site ? `${base} site:${site}` : `${base} when:14d`;
+
 }
 
 function companyRef(query: NewsQuery, name: string | null): CompanyRef {
