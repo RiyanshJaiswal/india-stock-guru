@@ -10,7 +10,7 @@
 
 import { classifyText, importanceScore, reliabilityScore } from "./news-classify";
 import { articleId, canonicalizeUrl, clusterArticles, sortFeed } from "./news-dedupe";
-import type { NewsProvider, NewsQuery } from "./news-provider";
+import type { NewsProvider, NewsQuery, RawArticle } from "./news-provider";
 import type {
   CompanyEvent,
   CorporateAction,
@@ -76,7 +76,7 @@ export async function aggregateNews(request: AggregationRequest): Promise<NewsFe
   );
 
   const coverage: ProviderCoverage[] = [];
-  const rawArticles = [];
+  const rawArticles: RawArticle[] = [];
   const events: CompanyEvent[] = [];
   const corporateActions: CorporateAction[] = [];
 
