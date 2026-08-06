@@ -583,7 +583,6 @@ export function mapNews(feed: NewsFeed) {
             ? `Corroborated by ${article.duplicateSources.length} other source(s).`
             : null,
         tags: ["news", article.primaryEventType, article.language, ...article.eventTypes],
-        ...src(article.source.kind),
       }),
     );
     if (at) {
@@ -680,5 +679,3 @@ export function mapNews(feed: NewsFeed) {
     completeness: feed.coverage.length === 0 ? 0 : ratio(okProviders, feed.coverage.length),
   };
 }
-
-const src = (_kind: string) => ({}) as Record<string, never>;
