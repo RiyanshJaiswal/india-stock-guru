@@ -34,7 +34,12 @@ export const askAI = createServerFn({ method: "POST" })
   .handler(async ({ data }): Promise<AIReasoningResult> => {
     const { runAIReasoning } = await import("./ai/ai-reasoning-engine.server");
     try {
-      return await runAIReasoning(data);
+      return await runAIReasoning({
+        question: data.question,
+        ...(data.symbols ? { symbols: data.symbols } : {}),
+        ...(data.provider ? { provider: data.provider } : {}),
+        ...(data.portfolio ? { portfolio: data.portfolio } : {}),
+      });
     } catch (error) {
       return {
         ok: false,
