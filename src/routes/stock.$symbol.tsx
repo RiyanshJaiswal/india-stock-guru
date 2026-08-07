@@ -76,7 +76,7 @@ function StockDetails() {
           <button
             type="button"
             onClick={() => refetch()}
-            className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-surface-2 px-3 py-2 text-xs font-semibold"
+            className="inline-flex shrink-0 cursor-pointer items-center gap-2 rounded-xl bg-surface-2 px-3 py-2 text-xs font-semibold"
           >
             <RefreshCw className={isFetching ? "h-4 w-4 animate-spin" : "h-4 w-4"} />
             Retry

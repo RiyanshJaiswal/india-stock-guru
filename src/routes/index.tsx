@@ -73,7 +73,7 @@ function Dashboard() {
               type="button"
               aria-label="Refresh data"
               onClick={() => queryClient.invalidateQueries()}
-              className="rounded-xl border border-border bg-surface-2/70 p-2 text-muted-foreground transition-colors hover:text-foreground"
+              className="cursor-pointer rounded-xl border border-border bg-surface-2/70 p-2 text-muted-foreground transition-colors hover:text-foreground"
             >
               <RefreshCw className="h-4 w-4" />
             </button>
