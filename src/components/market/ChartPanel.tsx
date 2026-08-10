@@ -26,6 +26,8 @@ const RANGES = [
   { label: "5Y", range: "5y" },
 ] as const;
 
+const SMA20_COLOR = "#f59e0b";
+
 type RangeValue = (typeof RANGES)[number]["range"];
 
 type ChartPoint = {
@@ -163,7 +165,7 @@ export function ChartPanel({
       : null;
 
   const overlays = [
-    { key: "sma20", label: "SMA 20", active: showSma20, setActive: setShowSma20 },
+    { key: "sma20", label: "SMA 20", active: showSma20, setActive: setShowSma20, color: SMA20_COLOR },
     { key: "sma50", label: "SMA 50", active: showSma50, setActive: setShowSma50 },
     { key: "ema20", label: "EMA 20", active: showEma20, setActive: setShowEma20 },
     { key: "ema50", label: "EMA 50", active: showEma50, setActive: setShowEma50 },
@@ -208,15 +210,16 @@ export function ChartPanel({
       </div>
 
       <div className="mt-2 flex flex-wrap gap-1.5">
-        {overlays.map(({ key, label, active, setActive }) => (
+        {overlays.map(({ key, label, active, setActive, color }) => (
           <button
             key={key}
             type="button"
             onClick={() => setActive(!active)}
+            style={color ? { color, borderColor: color } : undefined}
             className={cn(
               "rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-colors",
               active
-                ? "border-primary/40 bg-primary/10 text-primary"
+                ? "bg-primary/10"
                 : "border-border bg-surface-2/50 text-muted-foreground hover:text-foreground",
             )}
           >
@@ -299,7 +302,7 @@ export function ChartPanel({
                 isAnimationActive={false}
               />
               {showSma20 && (
-                <Line yAxisId="price" type="monotone" dataKey="sma20" stroke="#f59e0b" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line yAxisId="price" type="monotone" dataKey="sma20" stroke={SMA20_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} />
               )}
               {showSma50 && (
                 <Line yAxisId="price" type="monotone" dataKey="sma50" stroke="#38bdf8" strokeWidth={1.5} dot={false} isAnimationActive={false} />
