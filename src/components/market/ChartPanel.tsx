@@ -30,9 +30,16 @@ type RangeValue = (typeof RANGES)[number]["range"];
 
 type ChartPoint = {
   time: number;
+  open: number;
+  high: number;
+  low: number;
   close: number;
   volume: number;
   label: string;
+  sma20: number | null;
+  sma50: number | null;
+  ema20: number | null;
+  ema50: number | null;
 };
 
 function formatDate(timestamp: number, range: RangeValue) {
@@ -49,6 +56,23 @@ function formatTooltipDate(timestamp: number) {
     month: "short",
     year: "numeric",
   });
+}
+
+function sma(values: number[], index: number, period: number) {
+  if (index < period - 1) return null;
+  const slice = values.slice(index - period + 1, index + 1);
+  return slice.reduce((sum, value) => sum + value, 0) / period;
+}
+
+function ema(values: number[], index: number, period: number) {
+  if (index < period - 1) return null;
+  const start = period - 1;
+  let result = values.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
+  const multiplier = 2 / (period + 1);
+  for (let i = start + 1; i <= index; i += 1) {
+    result = (values[i] - result) * multiplier + result;
+  }
+  return result;
 }
 
 export function ChartPanel({
@@ -68,6 +92,10 @@ export function ChartPanel({
   const [points, setPoints] = useState<ChartPoint[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState<string | null>(null);
+  const [showSma20, setShowSma20] = useState(true);
+  const [showSma50, setShowSma50] = useState(false);
+  const [showEma20, setShowEma20] = useState(false);
+  const [showEma50, setShowEma50] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,12 +116,22 @@ export function ChartPanel({
           setHistoryError(result.error.message);
           return;
         }
+
+        const candles = result.candles;
+        const closes = candles.map((candle) => candle.close);
         setPoints(
-          result.candles.map((candle) => ({
+          candles.map((candle, index) => ({
             time: candle.time,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
             close: candle.close,
             volume: candle.volume,
             label: formatDate(candle.time, selectedRange),
+            sma20: sma(closes, index, 20),
+            sma50: sma(closes, index, 50),
+            ema20: ema(closes, index, 20),
+            ema50: ema(closes, index, 50),
           })),
         );
       })
@@ -123,6 +161,13 @@ export function ChartPanel({
     latestClose !== null && firstClose !== null && firstClose !== 0
       ? ((latestClose - firstClose) / firstClose) * 100
       : null;
+
+  const overlays = [
+    { key: "sma20", label: "SMA 20", active: showSma20, setActive: setShowSma20 },
+    { key: "sma50", label: "SMA 50", active: showSma50, setActive: setShowSma50 },
+    { key: "ema20", label: "EMA 20", active: showEma20, setActive: setShowEma20 },
+    { key: "ema50", label: "EMA 50", active: showEma50, setActive: setShowEma50 },
+  ] as const;
 
   return (
     <section className="panel p-4 sm:p-5" aria-label={`${ticker} chart`}>
@@ -162,7 +207,25 @@ export function ChartPanel({
         ))}
       </div>
 
-      <div className="mt-4 h-56 rounded-xl border border-border bg-surface-2/40 p-2 sm:h-72">
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {overlays.map(({ key, label, active, setActive }) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActive(!active)}
+            className={cn(
+              "rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-colors",
+              active
+                ? "border-primary/40 bg-primary/10 text-primary"
+                : "border-border bg-surface-2/50 text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      <div className="mt-3 h-56 rounded-xl border border-border bg-surface-2/40 p-2 sm:h-72">
         {historyLoading ? (
           <div className="grid h-full place-items-center text-sm text-muted-foreground">
             Loading historical prices…
@@ -203,10 +266,12 @@ export function ChartPanel({
               <Tooltip
                 labelFormatter={(value) => formatTooltipDate(Number(value))}
                 formatter={(value, name) => [
-                  name === "close"
+                  name === "close" || String(name).startsWith("sma") || String(name).startsWith("ema")
                     ? `₹${Number(value).toLocaleString("en-IN", { maximumFractionDigits: 2 })}`
                     : compactVolume(Number(value)),
-                  name === "close" ? "Close" : "Volume",
+                  name === "close"
+                    ? "Close"
+                    : String(name).toUpperCase(),
                 ]}
                 contentStyle={{
                   borderRadius: 10,
@@ -228,11 +293,23 @@ export function ChartPanel({
                 type="monotone"
                 dataKey="close"
                 stroke="currentColor"
-                className="text-primary"
+                className="text-foreground"
                 strokeWidth={2}
                 dot={false}
                 isAnimationActive={false}
               />
+              {showSma20 && (
+                <Line yAxisId="price" type="monotone" dataKey="sma20" stroke="#f59e0b" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+              )}
+              {showSma50 && (
+                <Line yAxisId="price" type="monotone" dataKey="sma50" stroke="#38bdf8" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+              )}
+              {showEma20 && (
+                <Line yAxisId="price" type="monotone" dataKey="ema20" stroke="#a78bfa" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+              )}
+              {showEma50 && (
+                <Line yAxisId="price" type="monotone" dataKey="ema50" stroke="#34d399" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+              )}
             </ComposedChart>
           </ResponsiveContainer>
         )}
