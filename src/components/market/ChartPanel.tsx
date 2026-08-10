@@ -27,6 +27,9 @@ const RANGES = [
 ] as const;
 
 const SMA20_COLOR = "#f59e0b";
+const SMA50_COLOR = "#38bdf8";
+const EMA20_COLOR = "#a78bfa";
+const EMA50_COLOR = "#34d399";
 
 type RangeValue = (typeof RANGES)[number]["range"];
 
@@ -166,9 +169,9 @@ export function ChartPanel({
 
   const overlays = [
     { key: "sma20", label: "SMA 20", active: showSma20, setActive: setShowSma20, color: SMA20_COLOR },
-    { key: "sma50", label: "SMA 50", active: showSma50, setActive: setShowSma50 },
-    { key: "ema20", label: "EMA 20", active: showEma20, setActive: setShowEma20 },
-    { key: "ema50", label: "EMA 50", active: showEma50, setActive: setShowEma50 },
+    { key: "sma50", label: "SMA 50", active: showSma50, setActive: setShowSma50, color: SMA50_COLOR },
+    { key: "ema20", label: "EMA 20", active: showEma20, setActive: setShowEma20, color: EMA20_COLOR },
+    { key: "ema50", label: "EMA 50", active: showEma50, setActive: setShowEma50, color: EMA50_COLOR },
   ] as const;
 
   return (
@@ -215,7 +218,7 @@ export function ChartPanel({
             key={key}
             type="button"
             onClick={() => setActive(!active)}
-            style={color ? { color, borderColor: color } : undefined}
+            style={{ color, borderColor: color }}
             className={cn(
               "rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-colors",
               active
@@ -305,13 +308,13 @@ export function ChartPanel({
                 <Line yAxisId="price" type="monotone" dataKey="sma20" stroke={SMA20_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} />
               )}
               {showSma50 && (
-                <Line yAxisId="price" type="monotone" dataKey="sma50" stroke="#38bdf8" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line yAxisId="price" type="monotone" dataKey="sma50" stroke={SMA50_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} />
               )}
               {showEma20 && (
-                <Line yAxisId="price" type="monotone" dataKey="ema20" stroke="#a78bfa" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line yAxisId="price" type="monotone" dataKey="ema20" stroke={EMA20_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} />
               )}
               {showEma50 && (
-                <Line yAxisId="price" type="monotone" dataKey="ema50" stroke="#34d399" strokeWidth={1.5} dot={false} isAnimationActive={false} />
+                <Line yAxisId="price" type="monotone" dataKey="ema50" stroke={EMA50_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} />
               )}
             </ComposedChart>
           </ResponsiveContainer>
