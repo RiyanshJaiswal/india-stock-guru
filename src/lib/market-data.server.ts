@@ -134,14 +134,13 @@ async function tataMotorsAdjustedHistory(interval: Interval, range: Range): Prom
   if (range === "1mo" || range === "3mo" || range === "6mo") return validateCandles(current, range);
   const legacy = await yahooHistory("TATAMOTORS.NS", interval, range);
   if (legacy.length === 0 || current.length === 0) return validateCandles(current, range);
-  const firstCurrentTime = current[0].time;
-  const legacyBefore = legacy.filter((c) => c.time < firstCurrentTime);
+  const demergerTime = Date.parse("2025-10-14T00:00:00+05:30");
+  const legacyBefore = legacy.filter((c) => c.time < demergerTime);
   if (legacyBefore.length === 0) return validateCandles(current, range);
   const anchor = legacyBefore.at(-1)?.close ?? 0;
   if (!anchor) return validateCandles(current, range);
-  const preDemergerClose = anchor;
   const impliedCvValue = 260.75;
-  const adjustmentFactor = impliedCvValue / preDemergerClose;
+  const adjustmentFactor = impliedCvValue / anchor;
   const adjustedLegacy = legacyBefore.map((c) => ({
     ...c,
     open: c.open * adjustmentFactor,
