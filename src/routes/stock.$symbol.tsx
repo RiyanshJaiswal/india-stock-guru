@@ -6,7 +6,7 @@ import { ChartPanel } from "@/components/market/ChartPanel";
 import { StatTile } from "@/components/market/StatTile";
 import { Delta } from "@/components/market/Delta";
 import { quoteQuery } from "@/lib/market-queries";
-import { compactInr, compactVolume, num, stripSuffix } from "@/lib/market-types";
+import { compactInr, compactVolume, exchangeOf, num, stripSuffix } from "@/lib/market-types";
 
 export const Route = createFileRoute("/stock/$symbol")({
   head: ({ params }) => {
@@ -65,6 +65,7 @@ function Shell({ children }: { children: React.ReactNode }) {
 function StockDetails() {
   const { symbol } = Route.useParams();
   const { data: quote, isLoading, isError, refetch, isFetching } = useQuery(quoteQuery(symbol));
+  const fallbackExchange = exchangeOf(symbol);
 
   return (
     <Shell>
@@ -128,7 +129,7 @@ function StockDetails() {
           </dl>
 
           <p className="mt-4 text-xs text-muted-foreground">
-            {quote?.exchange ?? "NSE"} · {quote?.currency ?? "INR"} ·{" "}
+            {quote?.exchange ?? fallbackExchange} · {quote?.currency ?? "INR"} ·{" "}
             {quote?.marketState === "REGULAR" ? "live session" : "last traded values"}
           </p>
         </section>
