@@ -3,6 +3,7 @@ import { Bar, CartesianGrid, Cell, ComposedChart, Line, ReferenceDot, ReferenceL
 import { Link } from "@tanstack/react-router";
 import { getHistory } from "@/lib/technical.functions";
 import { compactInr, compactVolume, num, stripSuffix, type Quote } from "@/lib/market-types";
+import { sma, ema, rsi, macd as calculateMacd } from "@/lib/indicators";
 import { Delta } from "./Delta";
 import { StatTile } from "./StatTile";
 import { cn } from "@/lib/utils";
@@ -37,38 +38,6 @@ function formatDate(timestamp: number, range: RangeValue) {
 function formatTooltipDate(timestamp: number) {
   return new Date(timestamp).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
 }
-function sma(values: number[], index: number, period: number) {
-  if (index < period - 1) return null;
-  const slice = values.slice(index - period + 1, index + 1);
-  return slice.reduce((sum, value) => sum + value, 0) / period;
-}
-function emaSeries(values: number[], period: number) {
-  const result: Array<number | null> = Array(values.length).fill(null);
-  if (values.length < period) return result;
-  let previous = values.slice(0, period).reduce((sum, value) => sum + value, 0) / period;
-  result[period - 1] = previous;
-  const multiplier = 2 / (period + 1);
-  for (let i = period; i < values.length; i += 1) {
-    previous = (values[i] - previous) * multiplier + previous;
-    result[i] = previous;
-  }
-  return result;
-}
-function rsiSeries(values: number[], period = 14) {
-  const result: Array<number | null> = Array(values.length).fill(null);
-  if (values.length <= period) return result;
-  let gains = 0, losses = 0;
-  for (let i = 1; i <= period; i += 1) { const change = values[i] - values[i - 1]; if (change >= 0) gains += change; else losses -= change; }
-  let averageGain = gains / period, averageLoss = losses / period;
-  result[period] = averageLoss === 0 ? 100 : 100 - 100 / (1 + averageGain / averageLoss);
-  for (let i = period + 1; i < values.length; i += 1) {
-    const change = values[i] - values[i - 1];
-    averageGain = (averageGain * (period - 1) + Math.max(change, 0)) / period;
-    averageLoss = (averageLoss * (period - 1) + Math.max(-change, 0)) / period;
-    result[i] = averageLoss === 0 ? 100 : 100 - 100 / (1 + averageGain / averageLoss);
-  }
-  return result;
-}
 
 export function ChartPanel({ quote, symbol, isLoading, linkToDetails = true }: { quote: Quote | null | undefined; symbol: string; isLoading?: boolean; linkToDetails?: boolean }) {
   const ticker = quote?.ticker ?? stripSuffix(symbol);
@@ -86,15 +55,23 @@ export function ChartPanel({ quote, symbol, isLoading, linkToDetails = true }: {
     getHistory({ data: { symbol, interval: "1d", range: selectedRange } }).then((result) => {
       if (cancelled) return;
       if (!result.ok) { setPoints([]); setHistoryError(result.error.message); return; }
-      const candles = result.candles, closes = candles.map((c) => c.close);
-      const ema20 = emaSeries(closes, 20), ema50 = emaSeries(closes, 50), rsi = rsiSeries(closes, 14);
-      const fast = emaSeries(closes, 12), slow = emaSeries(closes, 26);
-      const macd = closes.map((_, i) => fast[i] !== null && slow[i] !== null ? fast[i]! - slow[i]! : null);
-      const signal = emaSeries(macd.map((v) => v ?? 0), 9).map((v, i) => macd[i] === null ? null : v);
+      const candles = result.candles;
+      const closes = candles.map((c) => c.close);
+      const sma20 = sma(closes, 20);
+      const sma50 = sma(closes, 50);
+      const ema20 = ema(closes, 20);
+      const ema50 = ema(closes, 50);
+      const rsiSeries = rsi(closes, 14);
+      const macdSeries = calculateMacd(closes, 12, 26, 9);
       const recentCandles = candles.slice(-20);
       const supportLevel = recentCandles.length > 0 ? Math.min(...recentCandles.map((c) => c.low)) : null;
       const resistanceLevel = recentCandles.length > 0 ? Math.max(...recentCandles.map((c) => c.high)) : null;
-      setPoints(candles.map((c, i) => ({ time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume, label: formatDate(c.time, selectedRange), sma20: sma(closes, i, 20), sma50: sma(closes, i, 50), ema20: ema20[i], ema50: ema50[i], rsi: rsi[i], macd: macd[i], macdSignal: signal[i], macdHistogram: macd[i] !== null && signal[i] !== null ? macd[i]! - signal[i]! : null, supportLevel, resistanceLevel })));
+      setPoints(candles.map((c, i) => ({
+        time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
+        label: formatDate(c.time, selectedRange), sma20: sma20[i], sma50: sma50[i], ema20: ema20[i], ema50: ema50[i],
+        rsi: rsiSeries[i], macd: macdSeries.macd[i], macdSignal: macdSeries.signal[i], macdHistogram: macdSeries.histogram[i],
+        supportLevel, resistanceLevel,
+      })));
     }).catch((error) => { if (!cancelled) { setPoints([]); setHistoryError(error instanceof Error ? error.message : "Unable to load chart data."); } }).finally(() => { if (!cancelled) setHistoryLoading(false); });
     return () => { cancelled = true; };
   }, [symbol, selectedRange]);
