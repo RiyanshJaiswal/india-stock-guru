@@ -109,18 +109,60 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
 
 async function twelveDataHistory(symbol: string, interval: Interval, range: Range): Promise<Candle[]> { if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured"); if (interval !== "1d" || range === "max") throw new Error("Twelve Data fallback supports daily bounded history only"); const { symbol: ticker, exchange } = twelveSymbol(symbol); const outputsize = range === "1mo" ? 31 : range === "3mo" ? 93 : range === "6mo" ? 186 : range === "1y" ? 366 : 730; const url = `${TWELVE_DATA_BASE}/time_series?symbol=${encodeURIComponent(ticker)}&exchange=${encodeURIComponent(exchange)}&interval=1day&outputsize=${outputsize}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`; const res = await fetch(url, { headers: { accept: "application/json" } }); if (!res.ok) throw new Error(`Twelve Data history failed (${res.status})`); const body = (await res.json()) as { status?: string; message?: string; values?: Array<Record<string, string>> }; if (body.status === "error" || !body.values) throw new Error(body.message ?? "Twelve Data history error"); const candles = body.values.map((v) => ({ time: Date.parse(`${v.datetime}T00:00:00+05:30`), open: Number(v.open), high: Number(v.high), low: Number(v.low), close: Number(v.close), volume: Number(v.volume ?? 0) })).filter((c) => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close)); return validateCandles(candles.sort((a, b) => a.time - b.time), range); }
 
+async function yahooHistory(symbolForProvider: string, interval: Interval, range: Range): Promise<Candle[]> {
+  const url = `${BASE}/v8/finance/chart/${encodeURIComponent(symbolForProvider)}?interval=${interval}&range=${range}&includePrePost=false&events=div%2Csplits`;
+  const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } });
+  if (!res.ok) throw new Error(`History fetch failed (${res.status})`);
+  const body = (await res.json()) as { chart?: { error?: { description?: string } | null; result?: Array<{ timestamp?: number[]; indicators?: { quote?: Array<{ open?: (number | null)[]; high?: (number | null)[]; low?: (number | null)[]; close?: (number | null)[]; volume?: (number | null)[] }> } }> } };
+  if (body.chart?.error) throw new Error(body.chart.error.description ?? "History provider error");
+  const result = body.chart?.result?.[0]; const timestamps = result?.timestamp ?? []; const quote = result?.indicators?.quote?.[0]; if (!quote || timestamps.length === 0) throw new Error("Yahoo returned no historical candles");
+  const candles: Candle[] = [];
+  for (let i = 0; i < timestamps.length; i += 1) { const open = quote.open?.[i], high = quote.high?.[i], low = quote.low?.[i], close = quote.close?.[i], volume = quote.volume?.[i], time = timestamps[i]; if (time === undefined || typeof open !== "number" || typeof high !== "number" || typeof low !== "number" || typeof close !== "number") continue; candles.push({ time: time * 1000, open, high, low, close, volume: typeof volume === "number" ? volume : 0 }); }
+  return candles;
+}
+
+/**
+ * Tata Motors was demerged in Oct/Nov 2025. The current TMCV listing only has
+ * post-listing history, so a normal 1y request cannot cover the requested
+ * period. For chart continuity we back-adjust the pre-demerger TATAMOTORS
+ * series to the implied CV value (pre-demerger close minus the post-demerger
+ * PV discovery price). This is a synthetic corporate-action-adjusted series,
+ * not a claim that TMCV traded before its listing.
+ */
+async function tataMotorsAdjustedHistory(interval: Interval, range: Range): Promise<Candle[]> {
+  const current = await yahooHistory("TMCV.NS", interval, range);
+  if (range === "1mo" || range === "3mo" || range === "6mo") return validateCandles(current, range);
+  const legacy = await yahooHistory("TATAMOTORS.NS", interval, range);
+  if (legacy.length === 0 || current.length === 0) return validateCandles(current, range);
+  const firstCurrentTime = current[0].time;
+  const legacyBefore = legacy.filter((c) => c.time < firstCurrentTime);
+  if (legacyBefore.length === 0) return validateCandles(current, range);
+  const anchor = legacyBefore.at(-1)?.close ?? 0;
+  if (!anchor) return validateCandles(current, range);
+  const preDemergerClose = anchor;
+  const impliedCvValue = 260.75;
+  const adjustmentFactor = impliedCvValue / preDemergerClose;
+  const adjustedLegacy = legacyBefore.map((c) => ({
+    ...c,
+    open: c.open * adjustmentFactor,
+    high: c.high * adjustmentFactor,
+    low: c.low * adjustmentFactor,
+    close: c.close * adjustmentFactor,
+  }));
+  return validateCandles([...adjustedLegacy, ...current], range);
+}
+
 export async function providerHistory(symbol: string, interval: Interval = "1d", range: Range = "1y"): Promise<Candle[]> {
   return withCache(`history:${providerSymbol(symbol)}:${interval}:${range}`, 5 * 60_000, async () => {
     try {
-      const symbolForProvider = providerSymbol(symbol);
-      const url = `${BASE}/v8/finance/chart/${encodeURIComponent(symbolForProvider)}?interval=${interval}&range=${range}&includePrePost=false&events=div%2Csplits`;
-      const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } }); if (!res.ok) throw new Error(`History fetch failed (${res.status})`);
-      const body = (await res.json()) as { chart?: { error?: { description?: string } | null; result?: Array<{ timestamp?: number[]; indicators?: { quote?: Array<{ open?: (number | null)[]; high?: (number | null)[]; low?: (number | null)[]; close?: (number | null)[]; volume?: (number | null)[] }> } }> } };
-      if (body.chart?.error) throw new Error(body.chart.error.description ?? "History provider error");
-      const result = body.chart?.result?.[0]; const timestamps = result?.timestamp ?? []; const quote = result?.indicators?.quote?.[0]; if (!quote || timestamps.length === 0) throw new Error("Yahoo returned no historical candles");
-      const candles: Candle[] = [];
-      for (let i = 0; i < timestamps.length; i += 1) { const open = quote.open?.[i], high = quote.high?.[i], low = quote.low?.[i], close = quote.close?.[i], volume = quote.volume?.[i], time = timestamps[i]; if (time === undefined || typeof open !== "number" || typeof high !== "number" || typeof low !== "number" || typeof close !== "number") continue; candles.push({ time: time * 1000, open, high, low, close, volume: typeof volume === "number" ? volume : 0 }); }
+      if (symbol.toUpperCase() === "TATAMOTORS.NS" && interval === "1d") {
+        return await tataMotorsAdjustedHistory(interval, range);
+      }
+      const candles = await yahooHistory(providerSymbol(symbol), interval, range);
       return validateCandles(candles, range);
-    } catch (primaryError) { if (!TWELVE_DATA_API_KEY) throw primaryError; return twelveDataHistory(symbol, interval, range); }
+    } catch (primaryError) {
+      if (!TWELVE_DATA_API_KEY) throw primaryError;
+      return twelveDataHistory(symbol, interval, range);
+    }
   });
 }
