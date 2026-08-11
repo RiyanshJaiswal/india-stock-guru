@@ -51,6 +51,21 @@ async function yahooChartQuote(requestedSymbol: string): Promise<Quote> {
   return toQuote({ ...meta, symbol: normalized, regularMarketPreviousClose: meta["regularMarketPreviousClose"] ?? meta["chartPreviousClose"], fullExchangeName: meta["fullExchangeName"] ?? meta["exchangeName"], marketState: meta["marketState"] ?? "CLOSED" }, requestedSymbol);
 }
 
+/** Yahoo's fundamentals timeseries endpoint is used only when the quote payload omits marketCap. */
+async function yahooFundamentalMarketCap(requestedSymbol: string): Promise<number | null> {
+  const normalized = providerSymbol(requestedSymbol);
+  const end = Math.floor(Date.now() / 1000);
+  const start = end - 180 * 86_400;
+  const url = `${BASE.replace("query2", "query1")}/ws/fundamentals-timeseries/v1/finance/timeseries/${encodeURIComponent(normalized)}?symbol=${encodeURIComponent(normalized)}&type=trailingMarketCap&period1=${start}&period2=${end}`;
+  try {
+    const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { timeseries?: { result?: Array<{ trailingMarketCap?: Array<{ reportedValue?: { raw?: number } }> }> } };
+    const value = body.timeseries?.result?.[0]?.trailingMarketCap?.at(-1)?.reportedValue?.raw;
+    return nullable(value);
+  } catch { return null; }
+}
+
 function validateCandles(candles: Candle[], range: Range): Candle[] {
   const valid = candles.filter((c) => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close) && c.close > 0 && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close)).sort((a, b) => a.time - b.time);
   const deduped: Candle[] = [];
@@ -83,7 +98,10 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
         const providerResult = providerResults.find((item) => String(item["symbol"] ?? "").toUpperCase() === providerSymbol(requestedSymbol).toUpperCase());
         if (providerResult) { try { quotes.push(toQuote(providerResult, requestedSymbol)); } catch { missing.push(requestedSymbol); } } else missing.push(requestedSymbol); }
       if (missing.length > 0) { const recovered = await Promise.allSettled(missing.map((symbol) => yahooChartQuote(symbol))); recovered.forEach((result) => { if (result.status === "fulfilled") quotes.push(result.value); }); }
-      if (quotes.length > 0) return quotes;
+      if (quotes.length > 0) {
+        const enriched = await Promise.all(quotes.map(async (quote) => quote.marketCap !== null ? quote : { ...quote, marketCap: await yahooFundamentalMarketCap(quote.symbol) }));
+        return enriched;
+      }
       throw new Error("Yahoo returned no usable quotes");
     } catch (primaryError) { if (!TWELVE_DATA_API_KEY) throw primaryError; return twelveDataQuotes(uniqueSymbols); }
   });
