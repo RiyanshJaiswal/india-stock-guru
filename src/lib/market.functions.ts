@@ -24,5 +24,24 @@ export const getQuotes = createServerFn({ method: "GET" })
   .inputValidator((data: unknown) => quotesInput.parse(data))
   .handler(async ({ data }): Promise<Quote[]> => {
     const { providerQuotes } = await import("./market-data.server");
-    return providerQuotes(data.symbols);
+    const quotes = await providerQuotes(data.symbols);
+
+    // Normalize daily change from the same canonical values shown in the UI.
+    // Some providers can return stale/inconsistent change fields even when
+    // price and previousClose are correct. Deriving them here keeps every
+    // dashboard/detail/watchlist surface consistent.
+    return quotes.map((quote) => {
+      if (quote.price === null || quote.previousClose === null || quote.previousClose === 0) {
+        return quote;
+      }
+
+      const change = quote.price - quote.previousClose;
+      const changePercent = (change / quote.previousClose) * 100;
+
+      return {
+        ...quote,
+        change,
+        changePercent,
+      };
+    });
   });
