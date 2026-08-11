@@ -65,9 +65,9 @@ export const signed = (value: number | null | undefined, fraction = 2) =>
 export const compactInr = (value: number | null | undefined) => {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
   const abs = Math.abs(value);
-  if (abs >= 1e12) return `₹${(value / 1e12).toFixed(2)} L Cr`;
+  if (abs >= 1e12) return `₹${(value / 1e12).toFixed(2)} Lakh Cr`;
   if (abs >= 1e7) return `₹${(value / 1e7).toFixed(2)} Cr`;
-  if (abs >= 1e5) return `₹${(value / 1e5).toFixed(2)} L`;
+  if (abs >= 1e5) return `₹${(value / 1e5).toFixed(2)} Lakh`;
   return `₹${num(value, 0)}`;
 };
 
