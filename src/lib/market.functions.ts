@@ -23,25 +23,44 @@ export const searchStocks = createServerFn({ method: "GET" })
 export const getQuotes = createServerFn({ method: "GET" })
   .inputValidator((data: unknown) => quotesInput.parse(data))
   .handler(async ({ data }): Promise<Quote[]> => {
-    const { providerQuotes } = await import("./market-data.server");
+    const { providerQuotes, providerHistory } = await import("./market-data.server");
     const quotes = await providerQuotes(data.symbols);
 
-    // Normalize daily change from the same canonical values shown in the UI.
-    // Some providers can return stale/inconsistent change fields even when
-    // price and previousClose are correct. Deriving them here keeps every
-    // dashboard/detail/watchlist surface consistent.
-    return quotes.map((quote) => {
-      if (quote.price === null || quote.previousClose === null || quote.previousClose === 0) {
-        return quote;
+    // Canonicalize the daily change from the latest two validated daily
+    // candles. Quote endpoints can occasionally expose a stale previousClose
+    // (especially around session/market-date boundaries). The chart history
+    // is the same source used by the UI, so deriving the daily change from it
+    // prevents dashboard, watchlist and detail-page mismatches.
+    return Promise.all(quotes.map(async (quote) => {
+      if (quote.price === null) return quote;
+
+      try {
+        const candles = await providerHistory(quote.symbol, "1d", "1mo");
+        if (candles.length >= 2) {
+          const previousClose = candles[candles.length - 2].close;
+          if (Number.isFinite(previousClose) && previousClose > 0) {
+            const change = quote.price - previousClose;
+            const changePercent = (change / previousClose) * 100;
+            return {
+              ...quote,
+              previousClose,
+              change,
+              changePercent,
+            };
+          }
+        }
+      } catch {
+        // Keep the provider quote as a safe fallback when history is
+        // temporarily unavailable.
       }
 
+      if (quote.previousClose === null || quote.previousClose === 0) return quote;
       const change = quote.price - quote.previousClose;
       const changePercent = (change / quote.previousClose) * 100;
-
       return {
         ...quote,
         change,
         changePercent,
       };
-    });
+    }));
   });
