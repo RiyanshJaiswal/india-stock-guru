@@ -22,6 +22,20 @@ const UA =
 type Session = { cookie: string; crumb: string; createdAt: number };
 let session: Session | null = null;
 
+/**
+ * Yahoo/NSE changed Tata Motors' trading symbol after the 2025 demerger.
+ * Keep the legacy symbol working inside the app so existing watchlists and
+ * portfolio entries do not break, while querying the current NSE symbol.
+ */
+const LEGACY_SYMBOL_MAP: Record<string, string> = {
+  "TATAMOTORS.NS": "TMCV.NS",
+  "TATAMOTORS.BO": "544569.BO",
+};
+
+function providerSymbol(symbol: string): string {
+  return LEGACY_SYMBOL_MAP[symbol.toUpperCase()] ?? symbol;
+}
+
 async function createSession(): Promise<Session> {
   const seed = await fetch("https://fc.yahoo.com", { headers: { "user-agent": UA } });
   const headers = seed.headers as Headers & { getSetCookie?: () => string[] };
@@ -52,28 +66,30 @@ const nullable = (value: unknown): number | null =>
 
 type RawQuote = Record<string, unknown>;
 
-function toQuote(raw: RawQuote): Quote {
-  const symbol = String(raw['symbol'] ?? "");
-  const price = nullable(raw['regularMarketPrice']);
-  const previousClose = nullable(raw['regularMarketPreviousClose']);
+function toQuote(raw: RawQuote, requestedSymbol?: string): Quote {
+  const symbol = String(raw["symbol"] ?? requestedSymbol ?? "");
+  const price = nullable(raw["regularMarketPrice"]);
+  const previousClose = nullable(raw["regularMarketPreviousClose"]);
   return {
-    symbol,
-    ticker: stripSuffix(symbol),
-    name: String(raw['longName'] ?? raw['shortName'] ?? symbol),
-    exchange: String(raw['fullExchangeName'] ?? exchangeOf(symbol)),
-    currency: String(raw['currency'] ?? "INR"),
-    marketState: String(raw['marketState'] ?? "CLOSED"),
+    // Preserve the app's requested/legacy symbol so existing Watchlist and
+    // Portfolio lookups continue to match after provider symbol normalization.
+    symbol: requestedSymbol ?? symbol,
+    ticker: stripSuffix(requestedSymbol ?? symbol),
+    name: String(raw["longName"] ?? raw["shortName"] ?? symbol),
+    exchange: String(raw["fullExchangeName"] ?? exchangeOf(requestedSymbol ?? symbol)),
+    currency: String(raw["currency"] ?? "INR"),
+    marketState: String(raw["marketState"] ?? "CLOSED"),
     price,
     previousClose,
-    change: nullable(raw['regularMarketChange']),
-    changePercent: nullable(raw['regularMarketChangePercent']),
-    open: nullable(raw['regularMarketOpen']),
-    dayHigh: nullable(raw['regularMarketDayHigh']),
-    dayLow: nullable(raw['regularMarketDayLow']),
-    fiftyTwoWeekHigh: nullable(raw['fiftyTwoWeekHigh']),
-    fiftyTwoWeekLow: nullable(raw['fiftyTwoWeekLow']),
-    volume: nullable(raw['regularMarketVolume']),
-    marketCap: nullable(raw['marketCap']),
+    change: nullable(raw["regularMarketChange"]),
+    changePercent: nullable(raw["regularMarketChangePercent"]),
+    open: nullable(raw["regularMarketOpen"]),
+    dayHigh: nullable(raw["regularMarketDayHigh"]),
+    dayLow: nullable(raw["regularMarketDayLow"]),
+    fiftyTwoWeekHigh: nullable(raw["fiftyTwoWeekHigh"]),
+    fiftyTwoWeekLow: nullable(raw["fiftyTwoWeekLow"]),
+    volume: nullable(raw["regularMarketVolume"]),
+    marketCap: nullable(raw["marketCap"]),
   };
 }
 
@@ -86,18 +102,18 @@ export async function providerSearch(query: string): Promise<SearchResult[]> {
   const body = (await res.json()) as { quotes?: RawQuote[] };
   return (body.quotes ?? [])
     .filter((item) => {
-      const symbol = String(item['symbol'] ?? "");
+      const symbol = String(item["symbol"] ?? "");
       return (
-        item['quoteType'] === "EQUITY" && /\.(NS|BO)$/i.test(symbol) && !/^0P/i.test(symbol)
+        item["quoteType"] === "EQUITY" && /\.(NS|BO)$/i.test(symbol) && !/^0P/i.test(symbol)
       );
     })
     .slice(0, 12)
     .map((item) => {
-      const symbol = String(item['symbol']);
+      const symbol = String(item["symbol"]);
       return {
         symbol,
         ticker: stripSuffix(symbol),
-        name: String(item['longname'] ?? item['shortname'] ?? symbol),
+        name: String(item["longname"] ?? item["shortname"] ?? symbol),
         exchange: exchangeOf(symbol),
       };
     });
@@ -107,9 +123,14 @@ export async function providerSearch(query: string): Promise<SearchResult[]> {
 export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
   if (symbols.length === 0) return [];
 
+  const requestedToProvider = new Map(
+    symbols.map((symbol) => [symbol, providerSymbol(symbol)]),
+  );
+  const providerSymbols = [...new Set(requestedToProvider.values())];
+
   const request = async (retry: boolean): Promise<Response> => {
     const { cookie, crumb } = await getSession(retry);
-    const url = `${BASE}/v7/finance/quote?symbols=${encodeURIComponent(symbols.join(","))}&crumb=${encodeURIComponent(crumb)}`;
+    const url = `${BASE}/v7/finance/quote?symbols=${encodeURIComponent(providerSymbols.join(","))}&crumb=${encodeURIComponent(crumb)}`;
     return fetch(url, { headers: { "user-agent": UA, cookie, accept: "application/json" } });
   };
 
@@ -118,7 +139,14 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
   if (!res.ok) throw new Error(`Quote fetch failed (${res.status})`);
 
   const body = (await res.json()) as { quoteResponse?: { result?: RawQuote[] } };
-  return (body.quoteResponse?.result ?? []).map(toQuote);
+  const providerResults = body.quoteResponse?.result ?? [];
+
+  return symbols.flatMap((requestedSymbol) => {
+    const providerResult = providerResults.find(
+      (item) => String(item["symbol"] ?? "").toUpperCase() === providerSymbol(requestedSymbol).toUpperCase(),
+    );
+    return providerResult ? [toQuote(providerResult, requestedSymbol)] : [];
+  });
 }
 
 /** Historical OHLCV candles used by the technical analysis engine. */
@@ -127,7 +155,8 @@ export async function providerHistory(
   interval: Interval = "1d",
   range: Range = "1y",
 ): Promise<Candle[]> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
+  const symbolForProvider = providerSymbol(symbol);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbolForProvider)}?interval=${interval}&range=${range}&includePrePost=false`;
   const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } });
   if (!res.ok) throw new Error(`History fetch failed (${res.status})`);
 
@@ -186,4 +215,3 @@ export async function providerHistory(
   }
   return candles;
 }
-
