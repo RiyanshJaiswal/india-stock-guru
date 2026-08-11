@@ -26,28 +26,32 @@ export const getQuotes = createServerFn({ method: "GET" })
     const { providerQuotes, providerHistory } = await import("./market-data.server");
     const quotes = await providerQuotes(data.symbols);
 
-    // Canonicalize the daily change from the latest two validated daily
-    // candles. Quote endpoints can occasionally expose a stale previousClose
-    // (especially around session/market-date boundaries). The chart history
-    // is the same source used by the UI, so deriving the daily change from it
-    // prevents dashboard, watchlist and detail-page mismatches.
+    // Canonicalize fields from the same validated daily history used by the
+    // chart. This prevents dashboard/watchlist/detail mismatches and also
+    // repairs provider quote payloads that omit today's open value.
     return Promise.all(quotes.map(async (quote) => {
       if (quote.price === null) return quote;
 
       try {
         const candles = await providerHistory(quote.symbol, "1d", "1mo");
         if (candles.length >= 2) {
+          const latestCandle = candles[candles.length - 1];
           const previousClose = candles[candles.length - 2].close;
-          if (Number.isFinite(previousClose) && previousClose > 0) {
-            const change = quote.price - previousClose;
-            const changePercent = (change / previousClose) * 100;
-            return {
-              ...quote,
-              previousClose,
-              change,
-              changePercent,
-            };
-          }
+          const change = quote.price - previousClose;
+          const changePercent = previousClose > 0 ? (change / previousClose) * 100 : quote.changePercent;
+
+          return {
+            ...quote,
+            // Some Yahoo chart-recovery payloads do not expose regularMarketOpen.
+            // The latest validated daily candle is the authoritative fallback.
+            open: quote.open ?? latestCandle.open,
+            previousClose,
+            change,
+            changePercent,
+            dayHigh: quote.dayHigh ?? latestCandle.high,
+            dayLow: quote.dayLow ?? latestCandle.low,
+            volume: quote.volume ?? latestCandle.volume,
+          };
         }
       } catch {
         // Keep the provider quote as a safe fallback when history is
