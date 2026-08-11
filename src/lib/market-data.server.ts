@@ -1,13 +1,4 @@
-/**
- * Market data provider (server-only).
- *
- * Yahoo Finance remains the primary provider. The module now adds:
- * - short-lived server-side caching to reduce duplicate upstream requests
- * - payload validation so malformed/stale data is rejected
- * - optional Twelve Data fallback when TWELVE_DATA_API_KEY is configured
- * - legacy Tata Motors symbol normalization
- */
-
+/** Market data provider (server-only). */
 import { exchangeOf, stripSuffix, type Quote, type SearchResult } from "./market-types";
 import type { Candle, Interval, Range } from "./technical-types";
 import { withCache } from "./market-cache.server";
@@ -19,21 +10,9 @@ const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 
 type Session = { cookie: string; crumb: string; createdAt: number };
 let session: Session | null = null;
-
-const LEGACY_SYMBOL_MAP: Record<string, string> = {
-  "TATAMOTORS.NS": "TMCV.NS",
-  "TATAMOTORS.BO": "544569.BO",
-};
-
-function providerSymbol(symbol: string): string {
-  return LEGACY_SYMBOL_MAP[symbol.toUpperCase()] ?? symbol;
-}
-
-function twelveSymbol(symbol: string): { symbol: string; exchange: string } {
-  const normalized = providerSymbol(symbol);
-  const [ticker, suffix] = normalized.split(".");
-  return { symbol: ticker ?? normalized, exchange: suffix === "BO" ? "BSE" : "NSE" };
-}
+const LEGACY_SYMBOL_MAP: Record<string, string> = { "TATAMOTORS.NS": "TMCV.NS", "TATAMOTORS.BO": "544569.BO" };
+function providerSymbol(symbol: string): string { return LEGACY_SYMBOL_MAP[symbol.toUpperCase()] ?? symbol; }
+function twelveSymbol(symbol: string): { symbol: string; exchange: string } { const normalized = providerSymbol(symbol); const [ticker, suffix] = normalized.split("."); return { symbol: ticker ?? normalized, exchange: suffix === "BO" ? "BSE" : "NSE" }; }
 
 async function createSession(): Promise<Session> {
   const seed = await fetch("https://fc.yahoo.com", { headers: { "user-agent": UA } });
@@ -45,90 +24,39 @@ async function createSession(): Promise<Session> {
   if (!crumb || crumb.includes("<")) throw new Error("Could not authenticate with market data provider");
   return { cookie, crumb, createdAt: Date.now() };
 }
-
-async function getSession(refresh = false): Promise<Session> {
-  if (refresh || !session || Date.now() - session.createdAt > 20 * 60_000) session = await createSession();
-  return session;
-}
-
+async function getSession(refresh = false): Promise<Session> { if (refresh || !session || Date.now() - session.createdAt > 20 * 60_000) session = await createSession(); return session; }
 const nullable = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : null;
 type RawQuote = Record<string, unknown>;
+function validateRawQuote(raw: RawQuote): void { const price = nullable(raw["regularMarketPrice"]); if (price === null || price <= 0) throw new Error("Market provider returned an invalid quote price"); const marketState = String(raw["marketState"] ?? "").toUpperCase(); const marketTime = nullable(raw["regularMarketTime"]); if (marketTime !== null && marketState && marketState !== "CLOSED") { const ageMs = Date.now() - marketTime * 1000; if (ageMs > 6 * 60 * 60_000 || ageMs < -5 * 60_000) throw new Error("Market quote is stale or has an invalid timestamp"); } }
+function toQuote(raw: RawQuote, requestedSymbol?: string): Quote { validateRawQuote(raw); const symbol = String(raw["symbol"] ?? requestedSymbol ?? ""); return { symbol: requestedSymbol ?? symbol, ticker: stripSuffix(requestedSymbol ?? symbol), name: String(raw["longName"] ?? raw["shortName"] ?? symbol), exchange: String(raw["fullExchangeName"] ?? raw["exchangeName"] ?? exchangeOf(requestedSymbol ?? symbol)), currency: String(raw["currency"] ?? "INR"), marketState: String(raw["marketState"] ?? "CLOSED"), price: nullable(raw["regularMarketPrice"]), previousClose: nullable(raw["regularMarketPreviousClose"] ?? raw["chartPreviousClose"]), change: nullable(raw["regularMarketChange"]), changePercent: nullable(raw["regularMarketChangePercent"]), open: nullable(raw["regularMarketOpen"]), dayHigh: nullable(raw["regularMarketDayHigh"]), dayLow: nullable(raw["regularMarketDayLow"]), fiftyTwoWeekHigh: nullable(raw["fiftyTwoWeekHigh"]), fiftyTwoWeekLow: nullable(raw["fiftyTwoWeekLow"]), volume: nullable(raw["regularMarketVolume"]), marketCap: nullable(raw["marketCap"]) }; }
 
-function validateRawQuote(raw: RawQuote): void {
-  const price = nullable(raw["regularMarketPrice"]);
-  if (price === null || price <= 0) throw new Error("Market provider returned an invalid quote price");
-  const marketState = String(raw["marketState"] ?? "").toUpperCase();
-  const marketTime = nullable(raw["regularMarketTime"]);
-  if (marketTime !== null && marketState && marketState !== "CLOSED") {
-    const ageMs = Date.now() - marketTime * 1000;
-    if (ageMs > 6 * 60 * 60_000 || ageMs < -5 * 60_000) throw new Error("Market quote is stale or has an invalid timestamp");
-  }
+/** Yahoo chart metadata is a reliable per-symbol quote recovery path because it does not require crumb/cookie auth. */
+async function yahooChartQuote(requestedSymbol: string): Promise<Quote> {
+  const normalized = providerSymbol(requestedSymbol);
+  const url = `${BASE}/v8/finance/chart/${encodeURIComponent(normalized)}?interval=1d&range=5d&includePrePost=false&events=div%2Csplits`;
+  const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } });
+  if (!res.ok) throw new Error(`Quote recovery failed (${res.status})`);
+  const body = (await res.json()) as { chart?: { error?: { description?: string } | null; result?: Array<{ meta?: RawQuote }> } };
+  if (body.chart?.error) throw new Error(body.chart.error.description ?? "Yahoo quote recovery failed");
+  const meta = body.chart?.result?.[0]?.meta;
+  if (!meta) throw new Error("Yahoo returned no quote metadata");
+  return toQuote({ ...meta, symbol: normalized, regularMarketPreviousClose: meta["regularMarketPreviousClose"] ?? meta["chartPreviousClose"], fullExchangeName: meta["fullExchangeName"] ?? meta["exchangeName"], marketState: meta["marketState"] ?? "CLOSED" }, requestedSymbol);
 }
 
-function toQuote(raw: RawQuote, requestedSymbol?: string): Quote {
-  validateRawQuote(raw);
-  const symbol = String(raw["symbol"] ?? requestedSymbol ?? "");
-  return {
-    symbol: requestedSymbol ?? symbol,
-    ticker: stripSuffix(requestedSymbol ?? symbol),
-    name: String(raw["longName"] ?? raw["shortName"] ?? symbol),
-    exchange: String(raw["fullExchangeName"] ?? exchangeOf(requestedSymbol ?? symbol)),
-    currency: String(raw["currency"] ?? "INR"),
-    marketState: String(raw["marketState"] ?? "CLOSED"),
-    price: nullable(raw["regularMarketPrice"]), previousClose: nullable(raw["regularMarketPreviousClose"]),
-    change: nullable(raw["regularMarketChange"]), changePercent: nullable(raw["regularMarketChangePercent"]),
-    open: nullable(raw["regularMarketOpen"]), dayHigh: nullable(raw["regularMarketDayHigh"]), dayLow: nullable(raw["regularMarketDayLow"]),
-    fiftyTwoWeekHigh: nullable(raw["fiftyTwoWeekHigh"]), fiftyTwoWeekLow: nullable(raw["fiftyTwoWeekLow"]),
-    volume: nullable(raw["regularMarketVolume"]), marketCap: nullable(raw["marketCap"]),
-  };
-}
-
-/** Normalize provider candles instead of rejecting an otherwise usable history set. */
 function validateCandles(candles: Candle[], range: Range): Candle[] {
-  const valid = candles
-    .filter((c) => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close) && c.close > 0 && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close))
-    .sort((a, b) => a.time - b.time);
-
-  // Providers can occasionally return duplicate timestamps. Keep the last valid candle.
+  const valid = candles.filter((c) => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close) && c.close > 0 && c.high >= Math.max(c.open, c.close) && c.low <= Math.min(c.open, c.close)).sort((a, b) => a.time - b.time);
   const deduped: Candle[] = [];
-  for (const candle of valid) {
-    const previous = deduped[deduped.length - 1];
-    if (previous?.time === candle.time) deduped[deduped.length - 1] = candle;
-    else deduped.push(candle);
-  }
-
+  for (const candle of valid) { const previous = deduped[deduped.length - 1]; if (previous?.time === candle.time) deduped[deduped.length - 1] = candle; else deduped.push(candle); }
   if (deduped.length === 0) throw new Error("Market provider returned no valid candles");
-
-  // Do not reject a normal weekend/holiday gap. Only reject genuinely old history.
   const maxAgeDays = range === "1mo" || range === "3mo" || range === "6mo" || range === "1y" ? 15 : range === "2y" ? 30 : 120;
   const ageDays = (Date.now() - deduped[deduped.length - 1].time) / 86_400_000;
   if (ageDays > maxAgeDays) throw new Error(`Historical market data is stale (${Math.floor(ageDays)} days old)`);
   return deduped;
 }
 
-export async function providerSearch(query: string): Promise<SearchResult[]> {
-  return withCache(`search:${query.trim().toLowerCase()}`, 5 * 60_000, async () => {
-    const url = `${BASE}/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=25&newsCount=0&listsCount=0&enableFuzzyQuery=false`;
-    const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } });
-    if (!res.ok) throw new Error(`Search failed (${res.status})`);
-    const body = (await res.json()) as { quotes?: RawQuote[] };
-    return (body.quotes ?? []).filter((item) => { const symbol = String(item["symbol"] ?? ""); return item["quoteType"] === "EQUITY" && /\.(NS|BO)$/i.test(symbol) && !/^0P/i.test(symbol); }).slice(0, 12).map((item) => { const symbol = String(item["symbol"]); return { symbol, ticker: stripSuffix(symbol), name: String(item["longname"] ?? item["shortname"] ?? symbol), exchange: exchangeOf(symbol) }; });
-  });
-}
+export async function providerSearch(query: string): Promise<SearchResult[]> { return withCache(`search:${query.trim().toLowerCase()}`, 5 * 60_000, async () => { const url = `${BASE}/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=25&newsCount=0&listsCount=0&enableFuzzyQuery=false`; const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } }); if (!res.ok) throw new Error(`Search failed (${res.status})`); const body = (await res.json()) as { quotes?: RawQuote[] }; return (body.quotes ?? []).filter((item) => { const symbol = String(item["symbol"] ?? ""); return item["quoteType"] === "EQUITY" && /\.(NS|BO)$/i.test(symbol) && !/^0P/i.test(symbol); }).slice(0, 12).map((item) => { const symbol = String(item["symbol"]); return { symbol, ticker: stripSuffix(symbol), name: String(item["longname"] ?? item["shortname"] ?? symbol), exchange: exchangeOf(symbol) }; }); }); }
 
-async function twelveDataQuotes(symbols: string[]): Promise<Quote[]> {
-  if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured");
-  return Promise.all(symbols.map(async (requestedSymbol) => {
-    const { symbol, exchange } = twelveSymbol(requestedSymbol);
-    const url = `${TWELVE_DATA_BASE}/quote?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`;
-    const res = await fetch(url, { headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(`Twelve Data quote failed (${res.status})`);
-    const raw = (await res.json()) as Record<string, unknown>;
-    if (String(raw["status"] ?? "ok").toLowerCase() === "error" || raw["code"]) throw new Error(String(raw["message"] ?? "Twelve Data quote error"));
-    const price = Number(raw["close"]); if (!Number.isFinite(price) || price <= 0) throw new Error("Twelve Data returned an invalid quote");
-    return { symbol: requestedSymbol, ticker: stripSuffix(requestedSymbol), name: String(raw["name"] ?? symbol), exchange, currency: String(raw["currency"] ?? "INR"), marketState: "UNKNOWN", price, previousClose: nullable(Number(raw["previous_close"])), change: nullable(Number(raw["change"])), changePercent: nullable(Number(raw["percent_change"])), open: nullable(Number(raw["open"])), dayHigh: nullable(Number(raw["high"])), dayLow: nullable(Number(raw["low"])), fiftyTwoWeekHigh: nullable(Number(raw["fifty_two_week"])), fiftyTwoWeekLow: null, volume: nullable(Number(raw["volume"])), marketCap: null } satisfies Quote;
-  }));
-}
+async function twelveDataQuotes(symbols: string[]): Promise<Quote[]> { if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured"); return Promise.all(symbols.map(async (requestedSymbol) => { const { symbol, exchange } = twelveSymbol(requestedSymbol); const url = `${TWELVE_DATA_BASE}/quote?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`; const res = await fetch(url, { headers: { accept: "application/json" } }); if (!res.ok) throw new Error(`Twelve Data quote failed (${res.status})`); const raw = (await res.json()) as Record<string, unknown>; if (String(raw["status"] ?? "ok").toLowerCase() === "error" || raw["code"]) throw new Error(String(raw["message"] ?? "Twelve Data quote error")); const price = Number(raw["close"]); if (!Number.isFinite(price) || price <= 0) throw new Error("Twelve Data returned an invalid quote"); return { symbol: requestedSymbol, ticker: stripSuffix(requestedSymbol), name: String(raw["name"] ?? symbol), exchange, currency: String(raw["currency"] ?? "INR"), marketState: "UNKNOWN", price, previousClose: nullable(Number(raw["previous_close"])), change: nullable(Number(raw["change"])), changePercent: nullable(Number(raw["percent_change"])), open: nullable(Number(raw["open"])), dayHigh: nullable(Number(raw["high"])), dayLow: nullable(Number(raw["low"])), fiftyTwoWeekHigh: nullable(Number(raw["fifty_two_week"])), fiftyTwoWeekLow: null, volume: nullable(Number(raw["volume"])), marketCap: null } satisfies Quote; })); }
 
 export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
   if (symbols.length === 0) return [];
@@ -139,49 +67,41 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
       const providerSymbols = [...new Set(requestedToProvider.values())];
       const request = async (retry: boolean): Promise<Response> => { const { cookie, crumb } = await getSession(retry); const url = `${BASE}/v7/finance/quote?symbols=${encodeURIComponent(providerSymbols.join(","))}&crumb=${encodeURIComponent(crumb)}`; return fetch(url, { headers: { "user-agent": UA, cookie, accept: "application/json" } }); };
       let res = await request(false); if (res.status === 401 || res.status === 403) res = await request(true); if (!res.ok) throw new Error(`Quote fetch failed (${res.status})`);
-      const body = (await res.json()) as { quoteResponse?: { result?: RawQuote[] } }; const providerResults = body.quoteResponse?.result ?? [];
-      return uniqueSymbols.flatMap((requestedSymbol) => { const providerResult = providerResults.find((item) => String(item["symbol"] ?? "").toUpperCase() === providerSymbol(requestedSymbol).toUpperCase()); return providerResult ? [toQuote(providerResult, requestedSymbol)] : []; });
-    } catch (primaryError) { if (!TWELVE_DATA_API_KEY) throw primaryError; return twelveDataQuotes(uniqueSymbols); }
+      const body = (await res.json()) as { quoteResponse?: { result?: RawQuote[] } };
+      const providerResults = body.quoteResponse?.result ?? [];
+      const quotes: Quote[] = [];
+      const missing: string[] = [];
+      for (const requestedSymbol of uniqueSymbols) {
+        const providerResult = providerResults.find((item) => String(item["symbol"] ?? "").toUpperCase() === providerSymbol(requestedSymbol).toUpperCase());
+        if (providerResult) { try { quotes.push(toQuote(providerResult, requestedSymbol)); } catch { missing.push(requestedSymbol); } } else missing.push(requestedSymbol);
+      }
+      if (missing.length > 0) {
+        const recovered = await Promise.allSettled(missing.map((symbol) => yahooChartQuote(symbol)));
+        recovered.forEach((result) => { if (result.status === "fulfilled") quotes.push(result.value); });
+      }
+      if (quotes.length > 0) return quotes;
+      throw new Error("Yahoo returned no usable quotes");
+    } catch (primaryError) {
+      if (!TWELVE_DATA_API_KEY) throw primaryError;
+      return twelveDataQuotes(uniqueSymbols);
+    }
   });
 }
 
-async function twelveDataHistory(symbol: string, interval: Interval, range: Range): Promise<Candle[]> {
-  if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured");
-  if (interval !== "1d" || range === "max") throw new Error("Twelve Data fallback supports daily bounded history only");
-  const { symbol: ticker, exchange } = twelveSymbol(symbol);
-  const outputsize = range === "1mo" ? 31 : range === "3mo" ? 93 : range === "6mo" ? 186 : range === "1y" ? 366 : 730;
-  const url = `${TWELVE_DATA_BASE}/time_series?symbol=${encodeURIComponent(ticker)}&exchange=${encodeURIComponent(exchange)}&interval=1day&outputsize=${outputsize}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`;
-  const res = await fetch(url, { headers: { accept: "application/json" } }); if (!res.ok) throw new Error(`Twelve Data history failed (${res.status})`);
-  const body = (await res.json()) as { status?: string; message?: string; values?: Array<Record<string, string>> }; if (body.status === "error" || !body.values) throw new Error(body.message ?? "Twelve Data history error");
-  const candles = body.values.map((v) => ({ time: Date.parse(`${v.datetime}T00:00:00+05:30`), open: Number(v.open), high: Number(v.high), low: Number(v.low), close: Number(v.close), volume: Number(v.volume ?? 0) })).filter((c) => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close));
-  return validateCandles(candles.sort((a, b) => a.time - b.time), range);
-}
+async function twelveDataHistory(symbol: string, interval: Interval, range: Range): Promise<Candle[]> { if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured"); if (interval !== "1d" || range === "max") throw new Error("Twelve Data fallback supports daily bounded history only"); const { symbol: ticker, exchange } = twelveSymbol(symbol); const outputsize = range === "1mo" ? 31 : range === "3mo" ? 93 : range === "6mo" ? 186 : range === "1y" ? 366 : 730; const url = `${TWELVE_DATA_BASE}/time_series?symbol=${encodeURIComponent(ticker)}&exchange=${encodeURIComponent(exchange)}&interval=1day&outputsize=${outputsize}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`; const res = await fetch(url, { headers: { accept: "application/json" } }); if (!res.ok) throw new Error(`Twelve Data history failed (${res.status})`); const body = (await res.json()) as { status?: string; message?: string; values?: Array<Record<string, string>> }; if (body.status === "error" || !body.values) throw new Error(body.message ?? "Twelve Data history error"); const candles = body.values.map((v) => ({ time: Date.parse(`${v.datetime}T00:00:00+05:30`), open: Number(v.open), high: Number(v.high), low: Number(v.low), close: Number(v.close), volume: Number(v.volume ?? 0) })).filter((c) => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close)); return validateCandles(candles.sort((a, b) => a.time - b.time), range); }
 
-/** Historical OHLCV candles used by the technical analysis engine. */
 export async function providerHistory(symbol: string, interval: Interval = "1d", range: Range = "1y"): Promise<Candle[]> {
   return withCache(`history:${providerSymbol(symbol)}:${interval}:${range}`, 5 * 60_000, async () => {
     try {
       const symbolForProvider = providerSymbol(symbol);
-      // Yahoo's chart endpoint is the public historical-data endpoint. Do not use
-      // the authenticated quote/download path here: it can return 401/403 and
-      // break the whole chart even though quote data is available.
       const url = `${BASE}/v8/finance/chart/${encodeURIComponent(symbolForProvider)}?interval=${interval}&range=${range}&includePrePost=false&events=div%2Csplits`;
-      const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } });
-      if (!res.ok) throw new Error(`History fetch failed (${res.status})`);
+      const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } }); if (!res.ok) throw new Error(`History fetch failed (${res.status})`);
       const body = (await res.json()) as { chart?: { error?: { description?: string } | null; result?: Array<{ timestamp?: number[]; indicators?: { quote?: Array<{ open?: (number | null)[]; high?: (number | null)[]; low?: (number | null)[]; close?: (number | null)[]; volume?: (number | null)[] }> } }> } };
       if (body.chart?.error) throw new Error(body.chart.error.description ?? "History provider error");
-      const result = body.chart?.result?.[0]; const timestamps = result?.timestamp ?? []; const quote = result?.indicators?.quote?.[0];
-      if (!quote || timestamps.length === 0) throw new Error("Yahoo returned no historical candles");
+      const result = body.chart?.result?.[0]; const timestamps = result?.timestamp ?? []; const quote = result?.indicators?.quote?.[0]; if (!quote || timestamps.length === 0) throw new Error("Yahoo returned no historical candles");
       const candles: Candle[] = [];
-      for (let i = 0; i < timestamps.length; i += 1) {
-        const open = quote.open?.[i], high = quote.high?.[i], low = quote.low?.[i], close = quote.close?.[i], volume = quote.volume?.[i], time = timestamps[i];
-        if (time === undefined || typeof open !== "number" || typeof high !== "number" || typeof low !== "number" || typeof close !== "number") continue;
-        candles.push({ time: time * 1000, open, high, low, close, volume: typeof volume === "number" ? volume : 0 });
-      }
+      for (let i = 0; i < timestamps.length; i += 1) { const open = quote.open?.[i], high = quote.high?.[i], low = quote.low?.[i], close = quote.close?.[i], volume = quote.volume?.[i], time = timestamps[i]; if (time === undefined || typeof open !== "number" || typeof high !== "number" || typeof low !== "number" || typeof close !== "number") continue; candles.push({ time: time * 1000, open, high, low, close, volume: typeof volume === "number" ? volume : 0 }); }
       return validateCandles(candles, range);
-    } catch (primaryError) {
-      if (!TWELVE_DATA_API_KEY) throw primaryError;
-      return twelveDataHistory(symbol, interval, range);
-    }
+    } catch (primaryError) { if (!TWELVE_DATA_API_KEY) throw primaryError; return twelveDataHistory(symbol, interval, range); }
   });
 }
