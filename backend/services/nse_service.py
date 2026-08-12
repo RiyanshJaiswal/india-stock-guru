@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 import time
 from datetime import datetime
@@ -12,11 +13,25 @@ IST = ZoneInfo("Asia/Kolkata")
 def as_number(value):
     if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        # NSE/provider payloads can occasionally serialize numeric values as
+        # strings such as "5.10", "0.39%", or "10,400,260,115.84".
+        cleaned = value.strip().replace(",", "").replace("%", "")
+        if not cleaned or cleaned in {"-", "—", "NA", "N/A", "null", "None"}:
+            return None
+        try:
+            number = float(cleaned)
+            return number if math.isfinite(number) else None
+        except (TypeError, ValueError):
+            return None
     try:
         number = float(value)
     except (TypeError, ValueError):
         return None
-    return number if number == number else None
+    return number if math.isfinite(number) else None
 
 
 def first_number(*values):
@@ -39,6 +54,42 @@ def first_text(*values):
     return ""
 
 
+def dict_value(data: object, *keys: str):
+    """Case-insensitive lookup in one provider object."""
+    if not isinstance(data, dict):
+        return None
+    lowered = {str(key).lower(): value for key, value in data.items()}
+    for key in keys:
+        value = lowered.get(key.lower())
+        if value is not None:
+            return value
+    return None
+
+
+def deep_values(data: object, wanted: set[str], max_depth: int = 5):
+    """Yield values for wanted keys anywhere in a small NSE JSON payload."""
+    if max_depth < 0:
+        return
+    if isinstance(data, dict):
+        for key, value in data.items():
+            if str(key).lower() in {item.lower() for item in wanted}:
+                yield value
+            if isinstance(value, (dict, list)):
+                yield from deep_values(value, wanted, max_depth - 1)
+    elif isinstance(data, list):
+        for value in data:
+            if isinstance(value, (dict, list)):
+                yield from deep_values(value, wanted, max_depth - 1)
+
+
+def deep_number(data: object, *keys: str):
+    return first_number(*deep_values(data, set(keys)))
+
+
+def deep_text(data: object, *keys: str):
+    return first_text(*deep_values(data, set(keys)))
+
+
 def market_state(timestamp: str) -> str:
     try:
         parsed = datetime.strptime(timestamp, "%d-%b-%Y %H:%M:%S").replace(tzinfo=IST)
@@ -52,8 +103,9 @@ def market_state(timestamp: str) -> str:
 
 def normalize(symbol: str, quote: dict) -> dict:
     # Keep provider-specific NSE response parsing inside this service. The UI
-    # receives only the stable DTO below. NSE has changed nesting/casing of
-    # some fields across payload versions, so read all known locations.
+    # receives only the stable DTO below. Use both documented locations and
+    # case-insensitive deep fallbacks because NSE payload nesting has varied
+    # between jugaad-data/NSE response versions.
     metadata = quote.get("metaData", {}) or quote.get("metadata", {}) or {}
     info = quote.get("info", {}) or {}
     trade_info = quote.get("tradeInfo", {}) or {}
@@ -64,64 +116,65 @@ def normalize(symbol: str, quote: dict) -> dict:
     security_wise_dp = quote.get("securityWiseDP", {}) or {}
 
     company_name = first_text(
-        metadata.get("companyName"),
-        info.get("companyName"),
+        dict_value(metadata, "companyName"),
+        dict_value(info, "companyName"),
         quote.get("companyName"),
+        deep_text(quote, "companyName"),
         symbol,
     )
 
-    # IMPORTANT: for the current payload lastPrice is normally under
-    # tradeInfo/orderBook. Older jugaad-data documentation also exposes it
-    # under priceInfo, so keep that only as a fallback for compatibility.
     last_price = first_number(
-        trade_info.get("lastPrice"),
-        order_book.get("lastPrice"),
-        price_info.get("lastPrice"),
+        dict_value(trade_info, "lastPrice"),
+        dict_value(order_book, "lastPrice"),
+        dict_value(price_info, "lastPrice"),
         quote.get("lastPrice"),
+        deep_number(quote, "lastPrice"),
     )
     if last_price is None or last_price <= 0:
         raise ValueError("NSE response is missing a valid lastPrice")
 
-    # Current NSELive payloads have been observed with daily fields in both
-    # metaData and priceInfo. Also accept top-level values so a provider
-    # response variation cannot silently turn valid live data into UI dashes.
     previous_close = first_number(
-        metadata.get("previousClose"),
-        price_info.get("previousClose"),
-        price_info.get("basePrice"),
+        dict_value(metadata, "previousClose"),
+        dict_value(price_info, "previousClose"),
+        dict_value(price_info, "basePrice"),
         quote.get("previousClose"),
+        deep_number(quote, "previousClose", "basePrice"),
     )
     change = first_number(
-        metadata.get("change"),
-        price_info.get("change"),
+        dict_value(metadata, "change"),
+        dict_value(price_info, "change"),
         quote.get("change"),
+        deep_number(quote, "change"),
     )
     p_change = first_number(
-        metadata.get("pChange"),
-        price_info.get("pChange"),
+        dict_value(metadata, "pChange"),
+        dict_value(price_info, "pChange"),
         quote.get("pChange"),
+        deep_number(quote, "pChange", "changePercent", "percentChange"),
     )
     open_price = first_number(
-        metadata.get("open"),
-        price_info.get("open"),
+        dict_value(metadata, "open"),
+        dict_value(price_info, "open"),
         quote.get("open"),
+        deep_number(quote, "open"),
     )
     day_high = first_number(
-        metadata.get("dayHigh"),
-        price_info.get("dayHigh"),
-        intra_day.get("max"),
+        dict_value(metadata, "dayHigh"),
+        dict_value(price_info, "dayHigh"),
+        dict_value(intra_day, "max"),
         quote.get("dayHigh"),
+        deep_number(quote, "dayHigh", "high"),
     )
     day_low = first_number(
-        metadata.get("dayLow"),
-        price_info.get("dayLow"),
-        intra_day.get("min"),
+        dict_value(metadata, "dayLow"),
+        dict_value(price_info, "dayLow"),
+        dict_value(intra_day, "min"),
         quote.get("dayLow"),
+        deep_number(quote, "dayLow", "low"),
     )
 
     # If NSE gives price + previous close but omits explicit change fields,
-    # derive them from the same live quote. This prevents the frontend from
-    # ever substituting a chart-period return for the daily NSE change.
+    # derive them from the same live quote. Never use chart-period returns.
     if change is None and previous_close is not None:
         change = last_price - previous_close
     if p_change is None and previous_close not in (None, 0) and change is not None:
@@ -130,31 +183,36 @@ def normalize(symbol: str, quote: dict) -> dict:
     timestamp = first_text(
         quote.get("lastUpdateTime"),
         quote.get("lastUpdateTIme"),
-        metadata.get("lastUpdateTime"),
-        metadata.get("lastUpdateTIme"),
-        price_info.get("lastUpdateTime"),
+        dict_value(metadata, "lastUpdateTime"),
+        dict_value(metadata, "lastUpdateTIme"),
+        dict_value(price_info, "lastUpdateTime"),
+        deep_text(quote, "lastUpdateTime", "lastUpdateTIme"),
     )
 
     year_high = first_number(
-        price_info.get("yearHigh"),
+        dict_value(price_info, "yearHigh"),
         quote.get("yearHigh"),
-        week_high_low.get("max"),
+        dict_value(week_high_low, "max"),
+        deep_number(quote, "yearHigh", "52WeekHigh", "fiftyTwoWeekHigh"),
     )
     year_low = first_number(
-        price_info.get("yearLow"),
+        dict_value(price_info, "yearLow"),
         quote.get("yearLow"),
-        week_high_low.get("min"),
+        dict_value(week_high_low, "min"),
+        deep_number(quote, "yearLow", "52WeekLow", "fiftyTwoWeekLow"),
     )
 
     volume = first_number(
-        trade_info.get("quantitytraded"),
-        trade_info.get("totalTradedVolume"),
-        security_wise_dp.get("quantityTraded"),
+        dict_value(trade_info, "quantitytraded"),
+        dict_value(trade_info, "totalTradedVolume"),
+        dict_value(security_wise_dp, "quantityTraded"),
         quote.get("volume"),
+        deep_number(quote, "quantityTraded", "totalTradedVolume", "volume"),
     )
     market_cap = first_number(
-        trade_info.get("totalMarketCap"),
+        dict_value(trade_info, "totalMarketCap"),
         quote.get("totalMarketCap"),
+        deep_number(quote, "totalMarketCap", "marketCap"),
     )
 
     return {
@@ -206,7 +264,6 @@ def main() -> int:
             if not symbol:
                 continue
             try:
-                # IMPORTANT: NSELive receives plain NSE symbols, never .NS/.BO.
                 quote = fetch_with_retry(nse, symbol)
                 quotes.append(normalize(symbol, quote))
             except Exception as exc:
