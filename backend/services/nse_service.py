@@ -28,6 +28,17 @@ def first_number(*values):
     return None
 
 
+def first_text(*values):
+    """Return the first non-empty textual value."""
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 def market_state(timestamp: str) -> str:
     try:
         parsed = datetime.strptime(timestamp, "%d-%b-%Y %H:%M:%S").replace(tzinfo=IST)
@@ -41,55 +52,110 @@ def market_state(timestamp: str) -> str:
 
 def normalize(symbol: str, quote: dict) -> dict:
     # Keep provider-specific NSE response parsing inside this service. The UI
-    # receives only the stable DTO below.
+    # receives only the stable DTO below. NSE has changed nesting/casing of
+    # some fields across payload versions, so read all known locations.
     metadata = quote.get("metaData", {}) or quote.get("metadata", {}) or {}
+    info = quote.get("info", {}) or {}
     trade_info = quote.get("tradeInfo", {}) or {}
     order_book = quote.get("orderBook", {}) or {}
     price_info = quote.get("priceInfo", {}) or {}
     intra_day = price_info.get("intraDayHighLow", {}) or {}
+    week_high_low = price_info.get("weekHighLow", {}) or {}
+    security_wise_dp = quote.get("securityWiseDP", {}) or {}
 
-    company_name = str(metadata.get("companyName") or symbol)
+    company_name = first_text(
+        metadata.get("companyName"),
+        info.get("companyName"),
+        quote.get("companyName"),
+        symbol,
+    )
 
-    # IMPORTANT: current NSELive response exposes lastPrice under tradeInfo,
-    # with orderBook as the fallback. Do not use priceInfo.lastPrice here.
-    last_price = first_number(trade_info.get("lastPrice"), order_book.get("lastPrice"))
+    # IMPORTANT: for the current payload lastPrice is normally under
+    # tradeInfo/orderBook. Older jugaad-data documentation also exposes it
+    # under priceInfo, so keep that only as a fallback for compatibility.
+    last_price = first_number(
+        trade_info.get("lastPrice"),
+        order_book.get("lastPrice"),
+        price_info.get("lastPrice"),
+        quote.get("lastPrice"),
+    )
     if last_price is None or last_price <= 0:
         raise ValueError("NSE response is missing a valid lastPrice")
 
-    # NSELive versions/responses have exposed some daily fields under
-    # metaData and others under priceInfo. Prefer the current metaData fields,
-    # but fall back to priceInfo so a harmless NSE payload variation does not
-    # turn valid live values into UI dashes.
-    change = first_number(metadata.get("change"), price_info.get("change"))
-    p_change = first_number(metadata.get("pChange"), price_info.get("pChange"))
-    previous_close = first_number(metadata.get("previousClose"), price_info.get("previousClose"))
-    open_price = first_number(metadata.get("open"), price_info.get("open"))
-    day_high = first_number(metadata.get("dayHigh"), price_info.get("dayHigh"), intra_day.get("max"))
-    day_low = first_number(metadata.get("dayLow"), price_info.get("dayLow"), intra_day.get("min"))
+    # Current NSELive payloads have been observed with daily fields in both
+    # metaData and priceInfo. Also accept top-level values so a provider
+    # response variation cannot silently turn valid live data into UI dashes.
+    previous_close = first_number(
+        metadata.get("previousClose"),
+        price_info.get("previousClose"),
+        price_info.get("basePrice"),
+        quote.get("previousClose"),
+    )
+    change = first_number(
+        metadata.get("change"),
+        price_info.get("change"),
+        quote.get("change"),
+    )
+    p_change = first_number(
+        metadata.get("pChange"),
+        price_info.get("pChange"),
+        quote.get("pChange"),
+    )
+    open_price = first_number(
+        metadata.get("open"),
+        price_info.get("open"),
+        quote.get("open"),
+    )
+    day_high = first_number(
+        metadata.get("dayHigh"),
+        price_info.get("dayHigh"),
+        intra_day.get("max"),
+        quote.get("dayHigh"),
+    )
+    day_low = first_number(
+        metadata.get("dayLow"),
+        price_info.get("dayLow"),
+        intra_day.get("min"),
+        quote.get("dayLow"),
+    )
 
-    # If NSE gives price + previous close but omits the explicit change fields,
-    # derive them from the same live quote rather than showing a misleading
-    # chart-period return.
+    # If NSE gives price + previous close but omits explicit change fields,
+    # derive them from the same live quote. This prevents the frontend from
+    # ever substituting a chart-period return for the daily NSE change.
     if change is None and previous_close is not None:
         change = last_price - previous_close
     if p_change is None and previous_close not in (None, 0) and change is not None:
         p_change = (change / previous_close) * 100
 
-    timestamp = str(
-        quote.get("lastUpdateTime", "")
-        or quote.get("lastUpdateTIme", "")
-        or metadata.get("lastUpdateTime", "")
-        or metadata.get("lastUpdateTIme", "")
+    timestamp = first_text(
+        quote.get("lastUpdateTime"),
+        quote.get("lastUpdateTIme"),
+        metadata.get("lastUpdateTime"),
+        metadata.get("lastUpdateTIme"),
+        price_info.get("lastUpdateTime"),
     )
 
-    year_high = first_number(price_info.get("yearHigh"))
-    year_low = first_number(price_info.get("yearLow"))
-    if year_high is None or year_low is None:
-        week = price_info.get("weekHighLow") or {}
-        if year_high is None:
-            year_high = first_number(week.get("max"))
-        if year_low is None:
-            year_low = first_number(week.get("min"))
+    year_high = first_number(
+        price_info.get("yearHigh"),
+        quote.get("yearHigh"),
+        week_high_low.get("max"),
+    )
+    year_low = first_number(
+        price_info.get("yearLow"),
+        quote.get("yearLow"),
+        week_high_low.get("min"),
+    )
+
+    volume = first_number(
+        trade_info.get("quantitytraded"),
+        trade_info.get("totalTradedVolume"),
+        security_wise_dp.get("quantityTraded"),
+        quote.get("volume"),
+    )
+    market_cap = first_number(
+        trade_info.get("totalMarketCap"),
+        quote.get("totalMarketCap"),
+    )
 
     return {
         "symbol": symbol,
@@ -104,8 +170,8 @@ def normalize(symbol: str, quote: dict) -> dict:
         "dayLow": day_low,
         "fiftyTwoWeekHigh": year_high,
         "fiftyTwoWeekLow": year_low,
-        "volume": first_number(trade_info.get("quantitytraded"), trade_info.get("totalTradedVolume")),
-        "marketCap": first_number(trade_info.get("totalMarketCap")),
+        "volume": volume,
+        "marketCap": market_cap,
         "marketState": market_state(timestamp),
     }
 
@@ -146,9 +212,6 @@ def main() -> int:
             except Exception as exc:
                 errors.append({"symbol": symbol, "error": str(exc) or "NSE request failed"})
 
-        # A process that exits successfully with zero quotes makes the TS
-        # provider silently render an empty dashboard. Return failure instead
-        # so the server can activate its explicit recovery path.
         if not quotes:
             message = errors[0].get("error") if errors else "NSE returned no quotes"
             print(json.dumps({"quotes": [], "errors": errors or [{"error": message}]}, separators=(",", ":")))
