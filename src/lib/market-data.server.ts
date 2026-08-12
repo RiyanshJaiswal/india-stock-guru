@@ -152,15 +152,26 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
 
     if (nseSymbols.length > 0) {
       try {
+        // NSELive is always the primary source for NSE equity quotes.
         const nseResult = await fetchNseLiveQuotes(nseSymbols);
         quotes.push(...nseResult.quotes.map(nseQuoteToQuote));
         const failedNse = nseSymbols.filter((requested) => !nseResult.quotes.some((quote) => quote.symbol === stripSuffix(requested)));
         if (failedNse.length > 0 && TWELVE_DATA_API_KEY) {
           try { quotes.push(...await twelveDataQuotes(failedNse)); } catch { /* keep successful NSE quotes */ }
         }
-      } catch {
-        if (TWELVE_DATA_API_KEY) {
-          try { quotes.push(...await twelveDataQuotes(nseSymbols)); } catch { /* return empty/partial quotes */ }
+      } catch (nseError) {
+        // Emergency-only recovery: keep the dashboard usable if the local
+        // Python/NSE service is unavailable. This does not replace NSELive as
+        // the normal source for NSE equity quotes.
+        try {
+          quotes.push(...await yahooQuotes(nseSymbols));
+        } catch {
+          if (TWELVE_DATA_API_KEY) {
+            try { quotes.push(...await twelveDataQuotes(nseSymbols)); } catch { /* return empty/partial quotes */ }
+          }
+        }
+        if (quotes.length === 0 && nseError instanceof Error) {
+          console.error("NSELive quote service failed:", nseError.message);
         }
       }
     }
