@@ -98,7 +98,7 @@ function Dashboard() {
               onSelect={setActiveSymbol}
               onRemove={toggleWatch}
             />
-            <AiAssistant activeSymbol={stripSuffix(activeSymbol)} />
+            <AiAssistant activeSymbol={stripSuffix(activeSymbol)} activeQuote={activeQuote} />
           </div>
         </div>
 

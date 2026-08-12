@@ -1,89 +1,179 @@
-import { useState } from "react";
-import { SendHorizonal, Bot } from "lucide-react";
+import { useMemo, useState } from "react";
+import { SendHorizonal, Bot, Sparkles } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { askAi } from "@/lib/ai.functions";
+import { positions } from "@/data/market";
+import { quotesQuery } from "@/lib/market-queries";
+import { num, signed, stripSuffix, type Quote } from "@/lib/market-types";
 
 type Message = { id: string; role: "user" | "assistant"; content: string };
 
-const SUGGESTIONS = [
-  "Summarise today's Nifty move",
-  "Is my portfolio too banking-heavy?",
-  "Explain the Tata Motors spike",
+type Props = { activeSymbol: string; activeQuote?: Quote | null };
+
+const BASE_SUGGESTIONS = [
+  "Is this stock worth watching now?",
+  "Explain today's move",
+  "Analyse my portfolio P&L",
 ];
 
-/**
- * AI Assistant panel — UI shell with local mock replies.
- * Swap `respond()` for a POST to the FastAPI `/ai/chat` endpoint (streaming
- * or JSON) once the backend is wired; the message contract stays the same.
- */
-export function AiAssistant({ activeSymbol }: { activeSymbol: string }) {
+function localReply(prompt: string, symbol: string, quote: Quote | null | undefined, portfolio: {
+  invested: number;
+  current: number | null;
+  pnl: number | null;
+  bankWeight: number;
+}) {
+  const lower = prompt.toLowerCase();
+  const name = stripSuffix(symbol);
+
+  if (lower.includes("portfolio") || lower.includes("p&l") || lower.includes("pnl")) {
+    if (portfolio.current === null || portfolio.pnl === null) {
+      return "Portfolio prices are still loading. I don't want to guess your P&L.";
+    }
+    return `Portfolio snapshot: invested ${new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(portfolio.invested)}, current value ${new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(portfolio.current)}, P&L ${portfolio.pnl >= 0 ? "+" : "−"}${new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(Math.abs(portfolio.pnl))}. HDFC Bank is about ${portfolio.bankWeight.toFixed(1)}% of the invested portfolio, so banking concentration is meaningful.`;
+  }
+
+  if (!quote || quote.price === null) {
+    return `${name}: live quote is unavailable right now. I won't invent a number. Try again after the market data refreshes.`;
+  }
+
+  const move = quote.changePercent === null ? "change unavailable" : `${signed(quote.changePercent)}% today`;
+  if (lower.includes("buy") || lower.includes("sell") || lower.includes("worth")) {
+    return `${name} is at ₹${num(quote.price)} (${move}). From the data currently available I can confirm the price move, but not enough to call a buy/sell. A proper decision needs trend/valuation and risk levels; the key risk is acting on a single-day move.`;
+  }
+  if (lower.includes("why") || lower.includes("explain") || lower.includes("move") || lower.includes("spike") || lower.includes("fall")) {
+    return `${name} is at ₹${num(quote.price)} with ${move}. The quote feed alone does not contain a verified reason for the move, so I won't fabricate one. Check the latest company/news catalyst before treating today's move as fundamental.`;
+  }
+  return `${name}: ₹${num(quote.price)}, ${move}. Day range ₹${num(quote.dayLow)}–₹${num(quote.dayHigh)}, 52-week range ₹${num(quote.fiftyTwoWeekLow)}–₹${num(quote.fiftyTwoWeekHigh)}. Ask me about the stock, your portfolio, or a specific risk.`;
+}
+
+export function AiAssistant({ activeSymbol, activeQuote }: Props) {
+  const { data: portfolioQuotes } = useQuery(quotesQuery(positions.map((p) => p.symbol)));
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "seed",
       role: "assistant",
-      content:
-        "Good evening. Nifty closed 0.76% higher on broad-based buying, with autos leading and IT lagging. Ask me anything about your holdings or the tape.",
+      content: `I'm tracking ${stripSuffix(activeSymbol)} and your portfolio context. Ask me about the current price, today's move, risk, or P&L.`,
     },
   ]);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
 
-  const send = (text: string) => {
+  const portfolio = useMemo(() => {
+    const rows = positions.map((position) => {
+      const price = portfolioQuotes?.find((q) => q.symbol === position.symbol)?.price ?? null;
+      const invested = position.avgPrice * position.quantity;
+      const current = price === null ? null : price * position.quantity;
+      return { ...position, price, invested, current };
+    });
+    const invested = rows.reduce((sum, row) => sum + row.invested, 0);
+    const current = rows.every((row) => row.current !== null)
+      ? rows.reduce((sum, row) => sum + (row.current ?? 0), 0)
+      : null;
+    const hdfcInvested = rows.find((row) => stripSuffix(row.symbol) === "HDFCBANK")?.invested ?? 0;
+    return {
+      invested,
+      current,
+      pnl: current === null ? null : current - invested,
+      bankWeight: invested > 0 ? (hdfcInvested / invested) * 100 : 0,
+    };
+  }, [portfolioQuotes]);
+
+  const suggestions = useMemo(
+    () => [
+      `${stripSuffix(activeSymbol)} today: what matters?`,
+      "Is my portfolio too banking-heavy?",
+      "Analyse my portfolio P&L",
+    ],
+    [activeSymbol],
+  );
+
+  const send = async (text: string) => {
     const prompt = text.trim();
     if (!prompt || pending) return;
-    setMessages((prev) => [...prev, { id: `${Date.now()}-u`, role: "user", content: prompt }]);
+
+    const userMessage: Message = { id: `${Date.now()}-u`, role: "user", content: prompt };
+    const history = messages.slice(-10);
+    setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setPending(true);
-    window.setTimeout(() => {
+
+    const context = {
+      quote: activeQuote,
+      portfolio,
+      screen: "market-dashboard",
+    };
+
+    try {
+      const result = await askAi({
+        data: {
+          symbol: activeSymbol,
+          userMessage: prompt,
+          messages: history,
+          context,
+        },
+      });
+      const content = result.content || localReply(prompt, activeSymbol, activeQuote, portfolio);
+      setMessages((prev) => [
+        ...prev,
+        { id: `${Date.now()}-a`, role: "assistant", content },
+      ]);
+    } catch {
       setMessages((prev) => [
         ...prev,
         {
           id: `${Date.now()}-a`,
           role: "assistant",
-          content: `Here's my read on “${prompt}”. Focus name: ${activeSymbol}. Momentum is constructive but the risk-reward tightens near the day's high — connect the FastAPI backend to get live model-generated analysis here.`,
+          content: localReply(prompt, activeSymbol, activeQuote, portfolio),
         },
       ]);
+    } finally {
       setPending(false);
-    }, 650);
+    }
   };
 
   return (
-    <section className="panel flex h-full flex-col p-4" aria-label="AI assistant">
+    <section className="panel flex h-full min-h-[28rem] flex-col p-4" aria-label="AI assistant">
       <header className="flex min-w-0 items-center gap-2">
         <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary/15 text-primary">
           <Bot className="h-4 w-4" />
         </span>
         <div className="min-w-0">
           <h2 className="truncate text-sm font-bold tracking-widest uppercase">AI Assistant</h2>
-          <p className="truncate text-xs text-muted-foreground">Market copilot · demo mode</p>
+          <p className="truncate text-xs text-muted-foreground">
+            Market copilot · {stripSuffix(activeSymbol)} context
+          </p>
         </div>
+        <Sparkles className="ml-auto h-4 w-4 shrink-0 text-primary/70" />
       </header>
 
-      <div className="mt-3 flex-1 space-y-3 overflow-y-auto pr-1 lg:max-h-72">
+      <div className="mt-3 flex-1 space-y-3 overflow-y-auto pr-1 lg:max-h-80" aria-live="polite">
         {messages.map((message) =>
           message.role === "assistant" ? (
-            <p key={message.id} className="text-sm leading-relaxed text-foreground/90">
+            <div key={message.id} className="rounded-xl bg-surface-2/45 p-2.5 text-sm leading-relaxed text-foreground/90">
               {message.content}
-            </p>
+            </div>
           ) : (
             <p
               key={message.id}
-              className="ml-auto w-fit max-w-[85%] rounded-2xl rounded-br-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground"
+              className="ml-auto w-fit max-w-[88%] rounded-2xl rounded-br-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground"
             >
               {message.content}
             </p>
           ),
         )}
-        {pending && <p className="animate-pulse text-sm text-muted-foreground">Thinking…</p>}
+        {pending && <p className="animate-pulse text-sm text-muted-foreground">Analysing live context…</p>}
       </div>
 
       <div className="mt-3 flex flex-wrap gap-1.5">
-        {SUGGESTIONS.map((suggestion) => (
+        {suggestions.map((suggestion) => (
           <button
             key={suggestion}
             type="button"
-            onClick={() => send(suggestion)}
-            className="rounded-full border border-border bg-surface-2/70 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+            disabled={pending}
+            onClick={() => void send(suggestion)}
+            className="rounded-full border border-border bg-surface-2/70 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:opacity-50"
           >
             {suggestion}
           </button>
@@ -94,7 +184,7 @@ export function AiAssistant({ activeSymbol }: { activeSymbol: string }) {
         className="mt-3 flex items-center gap-2"
         onSubmit={(event) => {
           event.preventDefault();
-          send(input);
+          void send(input);
         }}
       >
         <label htmlFor="ai-input" className="sr-only">
@@ -104,10 +194,11 @@ export function AiAssistant({ activeSymbol }: { activeSymbol: string }) {
           id="ai-input"
           value={input}
           onChange={(event) => setInput(event.target.value)}
-          placeholder="Ask about a stock, sector or your P&L…"
+          placeholder={`Ask about ${stripSuffix(activeSymbol)}, your portfolio or P&L…`}
           className="h-10 rounded-xl border-border bg-surface-2/70 text-sm"
+          disabled={pending}
         />
-        <Button type="submit" size="icon" disabled={pending} className="h-10 w-10 shrink-0 rounded-xl">
+        <Button type="submit" size="icon" disabled={pending || !input.trim()} className="h-10 w-10 shrink-0 rounded-xl">
           <SendHorizonal className="h-4 w-4" />
           <span className="sr-only">Send</span>
         </Button>
