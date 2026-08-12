@@ -1,72 +1,64 @@
-/**
- * AI Reasoning API service layer.
- *
- * The only entry point the UI (or a future FastAPI bridge) should call.
- * Server-only modules are imported inside the handler so nothing leaks into
- * the client bundle.
- */
-
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
-import { routeQuestion } from "./ai/ai-question-router";
-import type { AIReasoningResult, AIRoutePlan, IntentClassification } from "./ai/ai-types";
 
-const askInput = z.object({
-  question: z.string().trim().min(2).max(600),
-  symbols: z.array(z.string().trim().min(1).max(24)).max(4).optional(),
-  provider: z.enum(["openai", "gemini", "ollama", "mock"]).optional(),
-  portfolio: z
-    .array(
-      z.object({
-        symbol: z.string().trim().min(1).max(24),
-        quantity: z.number().finite(),
-        avgPrice: z.number().finite(),
-      }),
-    )
-    .max(50)
-    .optional(),
+const messageSchema = z.object({
+  role: z.enum(["user", "assistant"]),
+  content: z.string().min(1).max(6000),
 });
 
-export type AskAIInput = z.input<typeof askInput>;
+const chatInput = z.object({
+  symbol: z.string().min(1).max(32),
+  userMessage: z.string().trim().min(1).max(2000),
+  messages: z.array(messageSchema).max(20),
+  context: z.record(z.string(), z.unknown()).default({}),
+});
 
-export const askAI = createServerFn({ method: "POST" })
-  .inputValidator((data: unknown) => askInput.parse(data))
-  .handler(async ({ data }): Promise<AIReasoningResult> => {
-    const { runAIReasoning } = await import("./ai/ai-reasoning-engine.server");
+const SYSTEM_PROMPT = `You are Dalal Desk AI, a concise Indian stock-market copilot.
+Use ONLY the supplied market context for factual numbers. Never invent a price, P&L, volume, market cap, news item, indicator, or event.
+If a required datum is missing, say that it is unavailable instead of guessing.
+Interpret NSE/BSE symbols correctly. Explain in simple language and use INR formatting.
+For trading questions, distinguish observation from inference and always mention the main risk/invalidating condition.
+Do not promise profits or certainty. This is research assistance, not personalized financial advice.
+Prefer a useful answer in 4-8 short bullets or a compact paragraph.`;
+
+export const askAi = createServerFn({ method: "POST" })
+  .inputValidator((data: unknown) => chatInput.parse(data))
+  .handler(async ({ data }) => {
+    const apiKey = process.env.AI_API_KEY ?? process.env.OPENAI_API_KEY;
+    const baseUrl = (process.env.AI_BASE_URL ?? "https://api.openai.com/v1").replace(/\/$/, "");
+    const model = process.env.AI_MODEL ?? process.env.OPENAI_MODEL;
+
+    if (!apiKey || !model) return { mode: "local" as const, content: "" };
+
     try {
-      return await runAIReasoning({
-        question: data.question,
-        ...(data.symbols ? { symbols: data.symbols } : {}),
-        ...(data.provider ? { provider: data.provider } : {}),
-        ...(data.portfolio ? { portfolio: data.portfolio } : {}),
-      });
-    } catch (error) {
-      return {
-        ok: false,
-        error: {
-          code: "CONTEXT_ERROR",
-          message: error instanceof Error ? error.message : "The AI reasoning engine failed.",
-          intent: null,
-          symbols: data.symbols ?? [],
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`,
         },
+        body: JSON.stringify({
+          model,
+          temperature: 0.2,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            {
+              role: "system",
+              content: `Current screen context (JSON):\n${JSON.stringify({ symbol: data.symbol, ...data.context })}`,
+            },
+            ...data.messages,
+            { role: "user", content: data.userMessage },
+          ],
+        }),
+      });
+
+      if (!response.ok) return { mode: "local" as const, content: "" };
+      const body = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
       };
+      const content = body.choices?.[0]?.message?.content?.trim();
+      return content ? { mode: "ai" as const, content } : { mode: "local" as const, content: "" };
+    } catch {
+      return { mode: "local" as const, content: "" };
     }
   });
-
-/** Cheap, model-free routing preview — useful for diagnostics and tests. */
-export const classifyQuestion = createServerFn({ method: "GET" })
-  .inputValidator((data: unknown) =>
-    z.object({ question: z.string().trim().min(1).max(600) }).parse(data),
-  )
-  .handler(
-    async ({
-      data,
-    }): Promise<{ classification: IntentClassification; plan: AIRoutePlan }> =>
-      routeQuestion(data.question),
-  );
-
-/** Which providers are configured in this environment. */
-export const getAIProviderStatus = createServerFn({ method: "GET" }).handler(async () => {
-  const { providerStatus } = await import("./ai/providers/registry.server");
-  return providerStatus();
-});
