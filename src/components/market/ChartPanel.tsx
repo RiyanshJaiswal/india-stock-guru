@@ -89,10 +89,8 @@ export function ChartPanel({ quote, symbol, isLoading, linkToDetails = true }: {
     return bullish || bearish ? [{ point, bullish }] : [];
   }), [chartData]);
   const latestClose = points.at(-1)?.close ?? quote?.price ?? null;
-  const firstClose = points[0]?.close ?? latestClose;
   const currentSupportLevel = points.at(-1)?.supportLevel ?? null;
   const currentResistanceLevel = points.at(-1)?.resistanceLevel ?? null;
-  const periodChange = latestClose !== null && firstClose !== null && firstClose !== 0 ? ((latestClose - firstClose) / firstClose) * 100 : null;
   const overlays = [
     { key: "sma20", label: "SMA 20", active: showSma20, setActive: setShowSma20, color: SMA20_COLOR },
     { key: "sma50", label: "SMA 50", active: showSma50, setActive: setShowSma50, color: SMA50_COLOR },
@@ -106,7 +104,7 @@ export function ChartPanel({ quote, symbol, isLoading, linkToDetails = true }: {
   return <section className="panel p-4 sm:p-5" aria-label={`${ticker} chart`}>
     <header className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3 sm:flex sm:items-center sm:justify-between">
       <div className="min-w-0"><div className="flex min-w-0 items-center gap-2"><h2 className="truncate text-lg font-bold sm:text-xl">{ticker}</h2><span className="shrink-0 rounded bg-surface-2 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">{exchange}</span></div><p className="truncate text-xs text-muted-foreground">{isLoading ? "Fetching latest quote…" : (quote?.name ?? symbol)}</p></div>
-      <div className="shrink-0 text-right"><p className="num text-lg font-bold sm:text-2xl">{num(quote?.price ?? latestClose)}</p><Delta change={quote?.change ?? null} changePercent={quote?.changePercent ?? periodChange} /></div>
+      <div className="shrink-0 text-right"><p className="num text-lg font-bold sm:text-2xl">{num(quote?.price ?? latestClose)}</p><Delta change={quote?.change ?? null} changePercent={quote?.changePercent ?? null} /></div>
     </header>
     <div className="mt-4 flex flex-wrap gap-1.5">{RANGES.map(({ label, range }) => <button key={range} type="button" onClick={() => setSelectedRange(range)} className={cn("num rounded-lg px-2.5 py-1 text-xs font-semibold transition-colors", selectedRange === range ? "bg-primary text-primary-foreground" : "bg-surface-2/70 text-muted-foreground hover:text-foreground")}>{label}</button>)}</div>
     <div className="mt-2 flex flex-wrap gap-1.5">{overlays.map(({ key, label, active, setActive, color }) => <button key={key} type="button" onClick={() => setActive(!active)} style={{ color, borderColor: color }} className={cn("rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition-colors", active ? "bg-primary/10" : "bg-surface-2/50 hover:text-foreground")}>{label}</button>)}</div>
