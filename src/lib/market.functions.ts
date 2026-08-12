@@ -1,9 +1,8 @@
 /**
  * Market API service layer.
  *
- * Every UI read goes through these server functions. To move onto the
- * FastAPI backend later, replace the provider imports below with `fetch`
- * calls to your API base URL — signatures and return types stay identical.
+ * Every UI read goes through these server functions. The provider layer hides
+ * the underlying market-data source so the frontend keeps a stable DTO.
  */
 
 import { createServerFn } from "@tanstack/react-start";
@@ -23,42 +22,6 @@ export const searchStocks = createServerFn({ method: "GET" })
 export const getQuotes = createServerFn({ method: "GET" })
   .inputValidator((data: unknown) => quotesInput.parse(data))
   .handler(async ({ data }): Promise<Quote[]> => {
-    const { providerQuotes, providerHistory } = await import("./market-data.server");
-    const quotes = await providerQuotes(data.symbols);
-
-    // Canonicalize fields from the same validated daily history used by the
-    // chart. This keeps dashboard/watchlist/detail values consistent.
-    return Promise.all(
-      quotes.map(async (quote) => {
-        if (quote.price === null) return quote;
-
-        try {
-          const candles = await providerHistory(quote.symbol, "1d", "1mo");
-          if (candles.length >= 2) {
-            const latestCandle = candles[candles.length - 1];
-            const previousClose = candles[candles.length - 2].close;
-            const change = quote.price - previousClose;
-            const changePercent = previousClose > 0 ? (change / previousClose) * 100 : quote.changePercent;
-
-            return {
-              ...quote,
-              open: quote.open ?? latestCandle.open,
-              previousClose,
-              change,
-              changePercent,
-              dayHigh: quote.dayHigh ?? latestCandle.high,
-              dayLow: quote.dayLow ?? latestCandle.low,
-              volume: quote.volume ?? latestCandle.volume,
-            };
-          }
-        } catch {
-          // Keep provider values when history is temporarily unavailable.
-        }
-
-        if (quote.previousClose === null || quote.previousClose === 0) return quote;
-        const change = quote.price - quote.previousClose;
-        const changePercent = (change / quote.previousClose) * 100;
-        return { ...quote, change, changePercent };
-      }),
-    );
+    const { providerQuotes } = await import("./market-data.server");
+    return providerQuotes(data.symbols);
   });

@@ -1,9 +1,8 @@
 /**
  * Shared market types (client-safe).
  *
- * These are the DTOs every UI component consumes. When the FastAPI backend
- * lands, only the fetchers in `market.functions.ts` change — components and
- * these types stay exactly the same.
+ * These are the DTOs every UI component consumes. Provider-specific payloads
+ * stay on the server and are normalized before reaching the client.
  */
 
 export type SearchResult = {
@@ -22,6 +21,7 @@ export type Quote = {
   exchange: string;
   currency: string;
   marketState: string;
+  timestamp: string | null;
   price: number | null;
   previousClose: number | null;
   change: number | null;

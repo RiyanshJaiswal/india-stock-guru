@@ -1,7 +1,8 @@
-/** Market data provider (server-only). */
+/** Market data providers (server-only). */
 import { exchangeOf, stripSuffix, type Quote, type SearchResult } from "./market-types";
 import type { Candle, Interval, Range } from "./technical-types";
 import { withCache } from "./market-cache.server";
+import { fetchNseLiveQuotes } from "./providers/nse-live.server";
 
 const BASE = "https://query2.finance.yahoo.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
@@ -13,6 +14,7 @@ let session: Session | null = null;
 const LEGACY_SYMBOL_MAP: Record<string, string> = { "TATAMOTORS.NS": "TMCV.NS", "TATAMOTORS.BO": "544569.BO" };
 function providerSymbol(symbol: string): string { return LEGACY_SYMBOL_MAP[symbol.toUpperCase()] ?? symbol; }
 function twelveSymbol(symbol: string): { symbol: string; exchange: string } { const normalized = providerSymbol(symbol); const [ticker, suffix] = normalized.split("."); return { symbol: ticker ?? normalized, exchange: suffix === "BO" ? "BSE" : "NSE" }; }
+function isNseEquitySymbol(symbol: string): boolean { const upper = symbol.toUpperCase(); return !upper.startsWith("^") && !upper.endsWith(".BO"); }
 
 function rangeStartMs(range: Range, endMs = Date.now()): number | null {
   if (range === "max") return null;
@@ -53,10 +55,10 @@ function toQuote(raw: RawQuote, requestedSymbol?: string): Quote {
   const reportedMarketCap = nullable(raw["marketCap"] ?? raw["marketCapEstimate"]);
   const sharesOutstanding = nullable(raw["sharesOutstanding"]);
   const calculatedMarketCap = price !== null && sharesOutstanding !== null && sharesOutstanding > 0 ? price * sharesOutstanding : null;
-  return { symbol: requestedSymbol ?? symbol, ticker: stripSuffix(requestedSymbol ?? symbol), name: String(raw["longName"] ?? raw["shortName"] ?? symbol), exchange: String(raw["fullExchangeName"] ?? raw["exchangeName"] ?? exchangeOf(requestedSymbol ?? symbol)), currency: String(raw["currency"] ?? "INR"), marketState: String(raw["marketState"] ?? "CLOSED"), price, previousClose: nullable(raw["regularMarketPreviousClose"] ?? raw["chartPreviousClose"]), change: nullable(raw["regularMarketChange"]), changePercent: nullable(raw["regularMarketChangePercent"]), open: nullable(raw["regularMarketOpen"]), dayHigh: nullable(raw["regularMarketDayHigh"]), dayLow: nullable(raw["regularMarketDayLow"]), fiftyTwoWeekHigh: nullable(raw["fiftyTwoWeekHigh"]), fiftyTwoWeekLow: nullable(raw["fiftyTwoWeekLow"]), volume: nullable(raw["regularMarketVolume"]), marketCap: reportedMarketCap ?? calculatedMarketCap };
+  return { symbol: requestedSymbol ?? symbol, ticker: stripSuffix(requestedSymbol ?? symbol), name: String(raw["longName"] ?? raw["shortName"] ?? symbol), exchange: String(raw["fullExchangeName"] ?? raw["exchangeName"] ?? exchangeOf(requestedSymbol ?? symbol)), currency: String(raw["currency"] ?? "INR"), marketState: String(raw["marketState"] ?? "CLOSED"), timestamp: typeof raw["regularMarketTime"] === "number" ? new Date((raw["regularMarketTime"] as number) * 1000).toISOString() : null, price, previousClose: nullable(raw["regularMarketPreviousClose"] ?? raw["chartPreviousClose"]), change: nullable(raw["regularMarketChange"]), changePercent: nullable(raw["regularMarketChangePercent"]), open: nullable(raw["regularMarketOpen"]), dayHigh: nullable(raw["regularMarketDayHigh"]), dayLow: nullable(raw["regularMarketDayLow"]), fiftyTwoWeekHigh: nullable(raw["fiftyTwoWeekHigh"]), fiftyTwoWeekLow: nullable(raw["fiftyTwoWeekLow"]), volume: nullable(raw["regularMarketVolume"]), marketCap: reportedMarketCap ?? calculatedMarketCap };
 }
 
-/** Yahoo chart metadata is a reliable per-symbol quote recovery path because it does not require crumb/cookie auth. */
+/** Yahoo chart metadata remains a recovery path for non-NSE current quotes. */
 async function yahooChartQuote(requestedSymbol: string): Promise<Quote> {
   const normalized = providerSymbol(requestedSymbol);
   const url = `${BASE}/v8/finance/chart/${encodeURIComponent(normalized)}?interval=1d&range=5d&includePrePost=false&events=div%2Csplits`;
@@ -69,7 +71,7 @@ async function yahooChartQuote(requestedSymbol: string): Promise<Quote> {
   return toQuote({ ...meta, symbol: normalized, regularMarketPreviousClose: meta["regularMarketPreviousClose"] ?? meta["chartPreviousClose"], fullExchangeName: meta["fullExchangeName"] ?? meta["exchangeName"], marketState: meta["marketState"] ?? "CLOSED" }, requestedSymbol);
 }
 
-/** Yahoo's fundamentals timeseries endpoint is used only when the quote payload omits marketCap. */
+/** Yahoo fundamentals timeseries remains available only for non-NSE quote enrichment. */
 async function yahooFundamentalMarketCap(requestedSymbol: string): Promise<number | null> {
   const normalized = providerSymbol(requestedSymbol);
   const end = Math.floor(Date.now() / 1000);
@@ -97,31 +99,81 @@ function validateCandles(candles: Candle[], range: Range): Candle[] {
 
 export async function providerSearch(query: string): Promise<SearchResult[]> { return withCache(`search:${query.trim().toLowerCase()}`, 5 * 60_000, async () => { const url = `${BASE}/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=25&newsCount=0&listsCount=0&enableFuzzyQuery=false`; const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } }); if (!res.ok) throw new Error(`Search failed (${res.status})`); const body = (await res.json()) as { quotes?: RawQuote[] }; return (body.quotes ?? []).filter((item) => { const symbol = String(item["symbol"] ?? ""); return item["quoteType"] === "EQUITY" && /\.(NS|BO)$/i.test(symbol) && !/^0P/i.test(symbol); }).slice(0, 12).map((item) => { const symbol = String(item["symbol"]); return { symbol, ticker: stripSuffix(symbol), name: String(item["longname"] ?? item["shortname"] ?? symbol), exchange: exchangeOf(symbol) }; }); }); }
 
-async function twelveDataQuotes(symbols: string[]): Promise<Quote[]> { if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured"); return Promise.all(symbols.map(async (requestedSymbol) => { const { symbol, exchange } = twelveSymbol(requestedSymbol); const url = `${TWELVE_DATA_BASE}/quote?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`; const res = await fetch(url, { headers: { accept: "application/json" } }); if (!res.ok) throw new Error(`Twelve Data quote failed (${res.status})`); const raw = (await res.json()) as Record<string, unknown>; if (String(raw["status"] ?? "ok").toLowerCase() === "error" || raw["code"]) throw new Error(String(raw["message"] ?? "Twelve Data quote error")); const price = Number(raw["close"]); if (!Number.isFinite(price) || price <= 0) throw new Error("Twelve Data returned an invalid quote"); return { symbol: requestedSymbol, ticker: stripSuffix(requestedSymbol), name: String(raw["name"] ?? symbol), exchange, currency: String(raw["currency"] ?? "INR"), marketState: "UNKNOWN", price, previousClose: nullable(Number(raw["previous_close"])), change: nullable(Number(raw["change"])), changePercent: nullable(Number(raw["percent_change"])), open: nullable(Number(raw["open"])), dayHigh: nullable(Number(raw["high"])), dayLow: nullable(Number(raw["low"])), fiftyTwoWeekHigh: nullable(Number(raw["fifty_two_week"])), fiftyTwoWeekLow: null, volume: nullable(Number(raw["volume"])), marketCap: nullable(Number(raw["market_cap"])) } satisfies Quote; })); }
+async function twelveDataQuotes(symbols: string[]): Promise<Quote[]> { if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured"); return Promise.all(symbols.map(async (requestedSymbol) => { const { symbol, exchange } = twelveSymbol(requestedSymbol); const url = `${TWELVE_DATA_BASE}/quote?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`; const res = await fetch(url, { headers: { accept: "application/json" } }); if (!res.ok) throw new Error(`Twelve Data quote failed (${res.status})`); const raw = (await res.json()) as Record<string, unknown>; if (String(raw["status"] ?? "ok").toLowerCase() === "error" || raw["code"]) throw new Error(String(raw["message"] ?? "Twelve Data quote error")); const price = Number(raw["close"]); if (!Number.isFinite(price) || price <= 0) throw new Error("Twelve Data returned an invalid quote"); return { symbol: requestedSymbol, ticker: stripSuffix(requestedSymbol), name: String(raw["name"] ?? symbol), exchange, currency: String(raw["currency"] ?? "INR"), marketState: "UNKNOWN", timestamp: null, price, previousClose: nullable(Number(raw["previous_close"])), change: nullable(Number(raw["change"])), changePercent: nullable(Number(raw["percent_change"])), open: nullable(Number(raw["open"])), dayHigh: nullable(Number(raw["high"])), dayLow: nullable(Number(raw["low"])), fiftyTwoWeekHigh: nullable(Number(raw["fifty_two_week"])), fiftyTwoWeekLow: null, volume: nullable(Number(raw["volume"])), marketCap: nullable(Number(raw["market_cap"])) } satisfies Quote; })); }
+
+async function yahooQuotes(symbols: string[]): Promise<Quote[]> {
+  if (symbols.length === 0) return [];
+  const requestedToProvider = new Map(symbols.map((symbol) => [symbol, providerSymbol(symbol)]));
+  const providerSymbols = [...new Set(requestedToProvider.values())];
+  const request = async (retry: boolean): Promise<Response> => { const { cookie, crumb } = await getSession(retry); const url = `${BASE}/v7/finance/quote?symbols=${encodeURIComponent(providerSymbols.join(","))}&crumb=${encodeURIComponent(crumb)}`; return fetch(url, { headers: { "user-agent": UA, cookie, accept: "application/json" } }); };
+  let res = await request(false); if (res.status === 401 || res.status === 403) res = await request(true); if (!res.ok) throw new Error(`Quote fetch failed (${res.status})`);
+  const body = (await res.json()) as { quoteResponse?: { result?: RawQuote[] } };
+  const providerResults = body.quoteResponse?.result ?? [];
+  const quotes: Quote[] = [];
+  const missing: string[] = [];
+  for (const requestedSymbol of symbols) {
+    const providerResult = providerResults.find((item) => String(item["symbol"] ?? "").toUpperCase() === providerSymbol(requestedSymbol).toUpperCase());
+    if (providerResult) { try { quotes.push(toQuote(providerResult, requestedSymbol)); } catch { missing.push(requestedSymbol); } } else missing.push(requestedSymbol);
+  }
+  if (missing.length > 0) { const recovered = await Promise.allSettled(missing.map((symbol) => yahooChartQuote(symbol))); recovered.forEach((result) => { if (result.status === "fulfilled") quotes.push(result.value); }); }
+  return Promise.all(quotes.map(async (quote) => quote.marketCap !== null ? quote : { ...quote, marketCap: await yahooFundamentalMarketCap(quote.symbol) }));
+}
+
+function nseQuoteToQuote(raw: Awaited<ReturnType<typeof fetchNseLiveQuotes>>["quotes"][number]): Quote {
+  return {
+    symbol: `${raw.symbol}.NS`,
+    ticker: raw.symbol,
+    name: raw.companyName,
+    exchange: "NSE",
+    currency: "INR",
+    marketState: raw.marketState,
+    timestamp: raw.timestamp,
+    price: raw.lastPrice,
+    previousClose: raw.previousClose,
+    change: raw.change,
+    changePercent: raw.pChange,
+    open: raw.open,
+    dayHigh: raw.dayHigh,
+    dayLow: raw.dayLow,
+    fiftyTwoWeekHigh: raw.fiftyTwoWeekHigh,
+    fiftyTwoWeekLow: raw.fiftyTwoWeekLow,
+    volume: raw.volume,
+    marketCap: raw.marketCap,
+  };
+}
 
 export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
   if (symbols.length === 0) return [];
-  const uniqueSymbols = [...new Set(symbols)];
-  return withCache(`quotes:${uniqueSymbols.map((s) => providerSymbol(s)).sort().join(",")}`, 30_000, async () => {
-    try {
-      const requestedToProvider = new Map(uniqueSymbols.map((symbol) => [symbol, providerSymbol(symbol)]));
-      const providerSymbols = [...new Set(requestedToProvider.values())];
-      const request = async (retry: boolean): Promise<Response> => { const { cookie, crumb } = await getSession(retry); const url = `${BASE}/v7/finance/quote?symbols=${encodeURIComponent(providerSymbols.join(","))}&crumb=${encodeURIComponent(crumb)}`; return fetch(url, { headers: { "user-agent": UA, cookie, accept: "application/json" } }); };
-      let res = await request(false); if (res.status === 401 || res.status === 403) res = await request(true); if (!res.ok) throw new Error(`Quote fetch failed (${res.status})`);
-      const body = (await res.json()) as { quoteResponse?: { result?: RawQuote[] } };
-      const providerResults = body.quoteResponse?.result ?? [];
-      const quotes: Quote[] = [];
-      const missing: string[] = [];
-      for (const requestedSymbol of uniqueSymbols) {
-        const providerResult = providerResults.find((item) => String(item["symbol"] ?? "").toUpperCase() === providerSymbol(requestedSymbol).toUpperCase());
-        if (providerResult) { try { quotes.push(toQuote(providerResult, requestedSymbol)); } catch { missing.push(requestedSymbol); } } else missing.push(requestedSymbol); }
-      if (missing.length > 0) { const recovered = await Promise.allSettled(missing.map((symbol) => yahooChartQuote(symbol))); recovered.forEach((result) => { if (result.status === "fulfilled") quotes.push(result.value); }); }
-      if (quotes.length > 0) {
-        const enriched = await Promise.all(quotes.map(async (quote) => quote.marketCap !== null ? quote : { ...quote, marketCap: await yahooFundamentalMarketCap(quote.symbol) }));
-        return enriched;
+  const uniqueSymbols = [...new Set(symbols.map((s) => s.trim()).filter(Boolean))];
+  return withCache(`quotes:${uniqueSymbols.sort().join(",")}`, 30_000, async () => {
+    const nseSymbols = uniqueSymbols.filter(isNseEquitySymbol);
+    const otherSymbols = uniqueSymbols.filter((symbol) => !isNseEquitySymbol(symbol));
+    const quotes: Quote[] = [];
+
+    if (nseSymbols.length > 0) {
+      try {
+        const nseResult = await fetchNseLiveQuotes(nseSymbols);
+        quotes.push(...nseResult.quotes.map(nseQuoteToQuote));
+        const failedNse = nseSymbols.filter((requested) => !nseResult.quotes.some((quote) => quote.symbol === stripSuffix(requested)));
+        if (failedNse.length > 0 && TWELVE_DATA_API_KEY) {
+          try { quotes.push(...await twelveDataQuotes(failedNse)); } catch { /* keep successful NSE quotes */ }
+        }
+      } catch {
+        if (TWELVE_DATA_API_KEY) {
+          try { quotes.push(...await twelveDataQuotes(nseSymbols)); } catch { /* return empty/partial quotes */ }
+        }
       }
-      throw new Error("Yahoo returned no usable quotes");
-    } catch (primaryError) { if (!TWELVE_DATA_API_KEY) throw primaryError; return twelveDataQuotes(uniqueSymbols); }
+    }
+
+    if (otherSymbols.length > 0) {
+      try { quotes.push(...await yahooQuotes(otherSymbols)); } catch {
+        if (TWELVE_DATA_API_KEY) {
+          try { quotes.push(...await twelveDataQuotes(otherSymbols)); } catch { /* return successful quotes from other sources */ }
+        }
+      }
+    }
+
+    return quotes;
   });
 }
 
@@ -142,14 +194,6 @@ async function yahooHistory(symbolForProvider: string, interval: Interval, range
   return clampToRequestedRange(candles, range, endMs);
 }
 
-/**
- * Tata Motors was demerged in Oct/Nov 2025. The current TMCV listing only has
- * post-listing history, so a normal 1y request cannot cover the requested
- * period. For chart continuity we back-adjust the pre-demerger TATAMOTORS
- * series to the implied CV value (pre-demerger close minus the post-demerger
- * PV discovery price). This is a synthetic corporate-action-adjusted series,
- * not a claim that TMCV traded before its listing.
- */
 async function tataMotorsAdjustedHistory(interval: Interval, range: Range): Promise<Candle[]> {
   const current = await yahooHistory("TMCV.NS", interval, range);
   if (range === "1mo" || range === "3mo" || range === "6mo") return validateCandles(current, range);
@@ -169,9 +213,7 @@ async function tataMotorsAdjustedHistory(interval: Interval, range: Range): Prom
 export async function providerHistory(symbol: string, interval: Interval = "1d", range: Range = "1y"): Promise<Candle[]> {
   return withCache(`history:${providerSymbol(symbol)}:${interval}:${range}`, 5 * 60_000, async () => {
     try {
-      if (symbol.toUpperCase() === "TATAMOTORS.NS" && interval === "1d") {
-        return await tataMotorsAdjustedHistory(interval, range);
-      }
+      if (symbol.toUpperCase() === "TATAMOTORS.NS" && interval === "1d") return await tataMotorsAdjustedHistory(interval, range);
       const candles = await yahooHistory(providerSymbol(symbol), interval, range);
       return validateCandles(clampToRequestedRange(candles, range), range);
     } catch (primaryError) {
