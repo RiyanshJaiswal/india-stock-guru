@@ -19,6 +19,15 @@ def as_number(value):
     return number if number == number else None
 
 
+def first_number(*values):
+    """Return the first value that can be normalized to a finite number."""
+    for value in values:
+        number = as_number(value)
+        if number is not None:
+            return number
+    return None
+
+
 def market_state(timestamp: str) -> str:
     try:
         parsed = datetime.strptime(timestamp, "%d-%b-%Y %H:%M:%S").replace(tzinfo=IST)
@@ -37,43 +46,66 @@ def normalize(symbol: str, quote: dict) -> dict:
     trade_info = quote.get("tradeInfo", {}) or {}
     order_book = quote.get("orderBook", {}) or {}
     price_info = quote.get("priceInfo", {}) or {}
+    intra_day = price_info.get("intraDayHighLow", {}) or {}
 
     company_name = str(metadata.get("companyName") or symbol)
 
     # IMPORTANT: current NSELive response exposes lastPrice under tradeInfo,
     # with orderBook as the fallback. Do not use priceInfo.lastPrice here.
-    last_price = as_number(trade_info.get("lastPrice"))
-    if last_price is None:
-        last_price = as_number(order_book.get("lastPrice"))
+    last_price = first_number(trade_info.get("lastPrice"), order_book.get("lastPrice"))
     if last_price is None or last_price <= 0:
         raise ValueError("NSE response is missing a valid lastPrice")
 
-    timestamp = str(quote.get("lastUpdateTime", "") or quote.get("lastUpdateTIme", ""))
+    # NSELive versions/responses have exposed some daily fields under
+    # metaData and others under priceInfo. Prefer the current metaData fields,
+    # but fall back to priceInfo so a harmless NSE payload variation does not
+    # turn valid live values into UI dashes.
+    change = first_number(metadata.get("change"), price_info.get("change"))
+    p_change = first_number(metadata.get("pChange"), price_info.get("pChange"))
+    previous_close = first_number(metadata.get("previousClose"), price_info.get("previousClose"))
+    open_price = first_number(metadata.get("open"), price_info.get("open"))
+    day_high = first_number(metadata.get("dayHigh"), price_info.get("dayHigh"), intra_day.get("max"))
+    day_low = first_number(metadata.get("dayLow"), price_info.get("dayLow"), intra_day.get("min"))
 
-    year_high = as_number(price_info.get("yearHigh"))
-    year_low = as_number(price_info.get("yearLow"))
+    # If NSE gives price + previous close but omits the explicit change fields,
+    # derive them from the same live quote rather than showing a misleading
+    # chart-period return.
+    if change is None and previous_close is not None:
+        change = last_price - previous_close
+    if p_change is None and previous_close not in (None, 0) and change is not None:
+        p_change = (change / previous_close) * 100
+
+    timestamp = str(
+        quote.get("lastUpdateTime", "")
+        or quote.get("lastUpdateTIme", "")
+        or metadata.get("lastUpdateTime", "")
+        or metadata.get("lastUpdateTIme", "")
+    )
+
+    year_high = first_number(price_info.get("yearHigh"))
+    year_low = first_number(price_info.get("yearLow"))
     if year_high is None or year_low is None:
         week = price_info.get("weekHighLow") or {}
         if year_high is None:
-            year_high = as_number(week.get("max"))
+            year_high = first_number(week.get("max"))
         if year_low is None:
-            year_low = as_number(week.get("min"))
+            year_low = first_number(week.get("min"))
 
     return {
         "symbol": symbol,
         "companyName": company_name,
         "lastPrice": last_price,
-        "change": as_number(metadata.get("change")),
-        "pChange": as_number(metadata.get("pChange")),
+        "change": change,
+        "pChange": p_change,
         "timestamp": timestamp,
-        "previousClose": as_number(metadata.get("previousClose")),
-        "open": as_number(metadata.get("open")),
-        "dayHigh": as_number(metadata.get("dayHigh")),
-        "dayLow": as_number(metadata.get("dayLow")),
+        "previousClose": previous_close,
+        "open": open_price,
+        "dayHigh": day_high,
+        "dayLow": day_low,
         "fiftyTwoWeekHigh": year_high,
         "fiftyTwoWeekLow": year_low,
-        "volume": as_number(trade_info.get("quantitytraded") or trade_info.get("totalTradedVolume")),
-        "marketCap": as_number(trade_info.get("totalMarketCap")),
+        "volume": first_number(trade_info.get("quantitytraded"), trade_info.get("totalTradedVolume")),
+        "marketCap": first_number(trade_info.get("totalMarketCap")),
         "marketState": market_state(timestamp),
     }
 
