@@ -81,11 +81,17 @@ function runPythonWithExecutable(payload: string, executable: string): Promise<N
       }
       try {
         const parsed = JSON.parse(stdout) as NseServiceResponse;
-        if (code !== 0 && (!parsed.quotes || parsed.quotes.length === 0)) {
-          finish(new Error(parsed.errors?.[0]?.error || stderr.trim() || "NSE data service failed"));
+        const quotes = Array.isArray(parsed.quotes) ? parsed.quotes : [];
+        const errors = Array.isArray(parsed.errors) ? parsed.errors : [];
+        if (code !== 0 || quotes.length === 0) {
+          const detail = errors
+            .map((item) => [item.symbol, item.error].filter(Boolean).join(": "))
+            .filter(Boolean)
+            .join("; ");
+          finish(new Error(detail || stderr.trim() || "NSE data service returned no quotes"));
           return;
         }
-        finish(undefined, parsed);
+        finish(undefined, { quotes, errors });
       } catch {
         finish(new Error(stderr.trim() || "NSE data service returned invalid JSON"));
       }
