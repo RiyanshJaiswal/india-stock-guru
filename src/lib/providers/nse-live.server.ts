@@ -31,12 +31,17 @@ type NseServiceResponse = {
   errors?: Array<{ symbol?: string; error?: string }>;
 };
 
-const pythonBin = process.env.NSE_PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
+const configuredPythonBin = process.env.NSE_PYTHON_BIN?.trim();
+const pythonBins = configuredPythonBin
+  ? [configuredPythonBin]
+  : process.platform === "win32"
+    ? ["python", "py", "python3"]
+    : ["python3", "python"];
 const servicePath = path.resolve(process.cwd(), "backend/services/nse_service.py");
 
-function runPython(payload: string): Promise<NseServiceResponse> {
+function runPythonWithExecutable(payload: string, executable: string): Promise<NseServiceResponse> {
   return new Promise((resolve, reject) => {
-    const child = spawn(pythonBin, [servicePath], {
+    const child = spawn(executable, [servicePath], {
       cwd: process.cwd(),
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -89,6 +94,18 @@ function runPython(payload: string): Promise<NseServiceResponse> {
     child.stdin.write(payload);
     child.stdin.end();
   });
+}
+
+async function runPython(payload: string): Promise<NseServiceResponse> {
+  let lastError: Error | null = null;
+  for (const executable of pythonBins) {
+    try {
+      return await runPythonWithExecutable(payload, executable);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  throw lastError ?? new Error("No usable Python executable found for NSE data service");
 }
 
 export async function fetchNseLiveQuotes(symbols: string[]): Promise<{
