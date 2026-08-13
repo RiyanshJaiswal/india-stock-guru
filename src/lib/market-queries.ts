@@ -4,6 +4,11 @@ import type { Quote } from "@/lib/market-types";
 
 /** Reusable query definitions so every surface shares one cache entry. */
 
+// Live NSE quotes are polled while the market is open. A 10s interval keeps
+// the UI responsive like a typical retail trading app without hammering NSE.
+const LIVE_QUOTE_INTERVAL = 10_000;
+const LIVE_QUOTE_STALE_TIME = 5_000;
+
 export const searchQuery = (query: string) =>
   queryOptions({
     queryKey: ["stock-search", query],
@@ -17,8 +22,10 @@ export const quotesQuery = (symbols: string[]) =>
     queryKey: ["quotes", [...symbols].sort()],
     queryFn: () => getQuotes({ data: { symbols } }),
     enabled: symbols.length > 0,
-    staleTime: 15_000,
-    refetchInterval: 30_000,
+    staleTime: LIVE_QUOTE_STALE_TIME,
+    refetchInterval: LIVE_QUOTE_INTERVAL,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
 
 export const quoteQuery = (symbol: string) =>
@@ -28,6 +35,8 @@ export const quoteQuery = (symbol: string) =>
       const [quote] = await getQuotes({ data: { symbols: [symbol] } });
       return quote ?? null;
     },
-    staleTime: 15_000,
-    refetchInterval: 30_000,
+    staleTime: LIVE_QUOTE_STALE_TIME,
+    refetchInterval: LIVE_QUOTE_INTERVAL,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: true,
   });
