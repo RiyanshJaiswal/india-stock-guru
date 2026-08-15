@@ -9,6 +9,14 @@ from jugaad_data.nse import NSELive
 
 IST = ZoneInfo("Asia/Kolkata")
 
+# Some display symbols (as used by the rest of the app) map to a different
+# name in NSE's own all_indices() response.
+INDEX_NAME_MAP = {
+    "^NSEI": "NIFTY 50",
+    "^NSEBANK": "NIFTY BANK",
+    "^INDIAVIX": "INDIA VIX",
+}
+
 
 def as_number(value):
     if value is None or isinstance(value, bool):
@@ -98,6 +106,13 @@ def market_state(timestamp: str) -> str:
             return "REGULAR"
     except Exception:
         pass
+    return "CLOSED"
+
+
+def market_state_now() -> str:
+    now = datetime.now(IST)
+    if now.weekday() < 5 and 9 <= now.hour < 16:
+        return "REGULAR"
     return "CLOSED"
 
 
@@ -234,6 +249,69 @@ def normalize(symbol: str, quote: dict) -> dict:
     }
 
 
+def normalize_index(requested_symbol: str, row: dict) -> dict:
+    last = as_number(row.get("last"))
+    if last is None or last <= 0:
+        raise ValueError("NSE index response is missing a valid last value")
+
+    previous_close = as_number(row.get("previousClose"))
+    change = as_number(row.get("variation"))
+    p_change = as_number(row.get("percentChange"))
+    if change is None and previous_close is not None:
+        change = last - previous_close
+    if p_change is None and previous_close not in (None, 0) and change is not None:
+        p_change = (change / previous_close) * 100
+
+    return {
+        "symbol": requested_symbol,
+        "companyName": first_text(row.get("index"), requested_symbol),
+        "lastPrice": last,
+        "change": change,
+        "pChange": p_change,
+        "timestamp": datetime.now(IST).strftime("%d-%b-%Y %H:%M:%S"),
+        "previousClose": previous_close,
+        "open": as_number(row.get("open")),
+        "dayHigh": as_number(row.get("high")),
+        "dayLow": as_number(row.get("low")),
+        "fiftyTwoWeekHigh": as_number(row.get("yearHigh")),
+        "fiftyTwoWeekLow": as_number(row.get("yearLow")),
+        "volume": None,
+        "marketCap": None,
+        "marketState": market_state_now(),
+    }
+
+
+def fetch_indices(nse: NSELive, requested_symbols: list[str]) -> tuple[list[dict], list[dict]]:
+    quotes: list[dict] = []
+    errors: list[dict] = []
+
+    try:
+        payload = nse.all_indices()
+        rows = payload.get("data", []) if isinstance(payload, dict) else []
+    except Exception as exc:
+        message = str(exc) or "NSE index request failed"
+        return [], [{"symbol": symbol, "error": message} for symbol in requested_symbols]
+
+    by_name = {}
+    for row in rows:
+        name = str(row.get("index", "")).strip().upper()
+        if name:
+            by_name[name] = row
+
+    for requested in requested_symbols:
+        target_name = INDEX_NAME_MAP.get(requested, requested).upper()
+        row = by_name.get(target_name)
+        if not row:
+            errors.append({"symbol": requested, "error": f"Index '{target_name}' not found in NSE response"})
+            continue
+        try:
+            quotes.append(normalize_index(requested, row))
+        except Exception as exc:
+            errors.append({"symbol": requested, "error": str(exc) or "NSE index normalize failed"})
+
+    return quotes, errors
+
+
 def fetch_with_retry(nse: NSELive, symbol: str, attempts: int = 2) -> dict:
     last_error = None
     for attempt in range(attempts):
@@ -251,23 +329,36 @@ def fetch_with_retry(nse: NSELive, symbol: str, attempts: int = 2) -> dict:
 
 def main() -> int:
     try:
-        symbols = json.load(sys.stdin)
+        payload = json.load(sys.stdin)
+
+        # Backward compatible input: a plain JSON array of equity symbols.
+        # New input: {"mode": "indices", "symbols": [...]} for index quotes.
+        mode = "equity"
+        symbols = payload
+        if isinstance(payload, dict):
+            mode = str(payload.get("mode") or "equity")
+            symbols = payload.get("symbols")
+
         if not isinstance(symbols, list):
-            raise ValueError("Input must be a JSON array of NSE symbols")
+            raise ValueError("Input must be a JSON array of symbols (or {mode, symbols})")
 
         nse = NSELive()
-        quotes = []
-        errors = []
+        quotes: list[dict] = []
+        errors: list[dict] = []
 
-        for raw_symbol in symbols:
-            symbol = str(raw_symbol).strip().upper()
-            if not symbol:
-                continue
-            try:
-                quote = fetch_with_retry(nse, symbol)
-                quotes.append(normalize(symbol, quote))
-            except Exception as exc:
-                errors.append({"symbol": symbol, "error": str(exc) or "NSE request failed"})
+        if mode == "indices":
+            requested = [str(s).strip() for s in symbols if str(s).strip()]
+            quotes, errors = fetch_indices(nse, requested)
+        else:
+            for raw_symbol in symbols:
+                symbol = str(raw_symbol).strip().upper()
+                if not symbol:
+                    continue
+                try:
+                    quote = fetch_with_retry(nse, symbol)
+                    quotes.append(normalize(symbol, quote))
+                except Exception as exc:
+                    errors.append({"symbol": symbol, "error": str(exc) or "NSE request failed"})
 
         if not quotes:
             message = errors[0].get("error") if errors else "NSE returned no quotes"

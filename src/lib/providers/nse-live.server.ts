@@ -31,6 +31,18 @@ type NseServiceResponse = {
   errors?: Array<{ symbol?: string; error?: string }>;
 };
 
+// NSE renamed some equity tickers after corporate actions (e.g. the Tata
+// Motors demerger into TMPV / TMCV). The rest of the app still refers to
+// stocks by their original/legacy ticker (e.g. "TATAMOTORS"), so requests
+// are translated to the current NSE ticker here, and responses are mapped
+// back to the original ticker before returning to the caller.
+const NSE_LEGACY_TICKER_MAP: Record<string, string> = {
+  TATAMOTORS: "TMCV",
+};
+function nseProviderTicker(ticker: string): string {
+  return NSE_LEGACY_TICKER_MAP[ticker] ?? ticker;
+}
+
 const configuredPythonBin = process.env.NSE_PYTHON_BIN?.trim();
 const pythonBins = configuredPythonBin
   ? [configuredPythonBin]
@@ -118,11 +130,39 @@ export async function fetchNseLiveQuotes(symbols: string[]): Promise<{
   quotes: NseLiveQuote[];
   errors: Array<{ symbol?: string; error?: string }>;
 }> {
-  const normalized = [...new Set(symbols.map((symbol) => symbol.replace(/\.(NS|BO)$/i, "").trim().toUpperCase()).filter(Boolean))];
-  if (normalized.length === 0) return { quotes: [], errors: [] };
+  const strippedTickers = [
+    ...new Set(symbols.map((symbol) => symbol.replace(/\.(NS|BO)$/i, "").trim().toUpperCase()).filter(Boolean)),
+  ];
+  if (strippedTickers.length === 0) return { quotes: [], errors: [] };
 
-  return runPython(JSON.stringify(normalized)).then((result) => ({
+  const providerTickers = strippedTickers.map(nseProviderTicker);
+  const providerToOriginal = new Map(providerTickers.map((provider, index) => [provider, strippedTickers[index]]));
+
+  const result = await runPython(JSON.stringify(providerTickers));
+  const quotes = (result.quotes ?? []).map((quote) => ({
+    ...quote,
+    symbol: providerToOriginal.get(quote.symbol) ?? quote.symbol,
+  }));
+  const errors = (result.errors ?? []).map((error) => ({
+    ...error,
+    symbol: error.symbol ? (providerToOriginal.get(error.symbol) ?? error.symbol) : error.symbol,
+  }));
+
+  return { quotes, errors };
+}
+
+/** Live index quotes (e.g. "^NSEI", "^NSEBANK", "^INDIAVIX") via NSE's allIndices feed. */
+export async function fetchNseLiveIndices(indexSymbols: string[]): Promise<{
+  quotes: NseLiveQuote[];
+  errors: Array<{ symbol?: string; error?: string }>;
+}> {
+  const unique = [...new Set(indexSymbols.map((symbol) => symbol.trim()).filter(Boolean))];
+  if (unique.length === 0) return { quotes: [], errors: [] };
+
+  const payload = JSON.stringify({ mode: "indices", symbols: unique });
+  const result = await runPython(payload);
+  return {
     quotes: result.quotes ?? [],
     errors: result.errors ?? [],
-  }));
+  };
 }

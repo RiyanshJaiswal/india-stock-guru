@@ -3,11 +3,13 @@ import { getQuotes, searchStocks } from "@/lib/market.functions";
 import type { Quote } from "@/lib/market-types";
 
 /** Reusable query definitions so every surface shares one cache entry. */
-
-// Live NSE quotes are polled while the market is open. A 10s interval keeps
-// the UI responsive like a typical retail trading app without hammering NSE.
-const LIVE_QUOTE_INTERVAL = 10_000;
-const LIVE_QUOTE_STALE_TIME = 5_000;
+//
+// NOTE: every quote refetch spawns a fresh Python process (nse_service.py),
+// and NSELive() re-establishes a session with nseindia.com on each run.
+// Polling too aggressively (short interval + background/focus refetch) can
+// get the app's IP rate-limited or blocked by NSE, and is unnecessarily
+// heavy on the machine. Keep this at 30s / no background polling unless
+// you've moved to a persistent, properly rate-limited data source.
 
 export const searchQuery = (query: string) =>
   queryOptions({
@@ -22,10 +24,8 @@ export const quotesQuery = (symbols: string[]) =>
     queryKey: ["quotes", [...symbols].sort()],
     queryFn: () => getQuotes({ data: { symbols } }),
     enabled: symbols.length > 0,
-    staleTime: LIVE_QUOTE_STALE_TIME,
-    refetchInterval: LIVE_QUOTE_INTERVAL,
-    refetchIntervalInBackground: true,
-    refetchOnWindowFocus: true,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
   });
 
 export const quoteQuery = (symbol: string) =>
@@ -35,8 +35,6 @@ export const quoteQuery = (symbol: string) =>
       const [quote] = await getQuotes({ data: { symbols: [symbol] } });
       return quote ?? null;
     },
-    staleTime: LIVE_QUOTE_STALE_TIME,
-    refetchInterval: LIVE_QUOTE_INTERVAL,
-    refetchIntervalInBackground: true,
-    refetchOnWindowFocus: true,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
   });

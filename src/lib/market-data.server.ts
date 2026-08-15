@@ -2,12 +2,17 @@
 import { exchangeOf, stripSuffix, type Quote, type SearchResult } from "./market-types";
 import type { Candle, Interval, Range } from "./technical-types";
 import { withCache } from "./market-cache.server";
-import { fetchNseLiveQuotes } from "./providers/nse-live.server";
+import { fetchNseLiveQuotes, fetchNseLiveIndices } from "./providers/nse-live.server";
 
 const BASE = "https://query2.finance.yahoo.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
 const TWELVE_DATA_BASE = "https://api.twelvedata.com";
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
+
+// Index symbols NSE's own allIndices feed can serve directly. SENSEX
+// (^BSESN) is a BSE index and has no NSE-live equivalent, so it always
+// falls back to Yahoo below.
+const NSE_LIVE_INDEX_SYMBOLS = new Set(["^NSEI", "^NSEBANK", "^INDIAVIX"]);
 
 type Session = { cookie: string; crumb: string; createdAt: number };
 let session: Session | null = null;
@@ -120,8 +125,13 @@ async function yahooQuotes(symbols: string[]): Promise<Quote[]> {
 }
 
 function nseQuoteToQuote(raw: Awaited<ReturnType<typeof fetchNseLiveQuotes>>["quotes"][number]): Quote {
+  // Equity quotes come back as a bare ticker (e.g. "RELIANCE") and need the
+  // ".NS" suffix the rest of the app expects. Index quotes are already
+  // passed through as their display symbol (e.g. "^NSEI") and must not be
+  // suffixed.
+  const isIndex = raw.symbol.startsWith("^");
   return {
-    symbol: `${raw.symbol}.NS`,
+    symbol: isIndex ? raw.symbol : `${raw.symbol}.NS`,
     ticker: raw.symbol,
     name: raw.companyName,
     exchange: "NSE",
@@ -147,7 +157,8 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
   const uniqueSymbols = [...new Set(symbols.map((s) => s.trim()).filter(Boolean))];
   return withCache(`quotes:${uniqueSymbols.sort().join(",")}`, 30_000, async () => {
     const nseSymbols = uniqueSymbols.filter(isNseEquitySymbol);
-    const otherSymbols = uniqueSymbols.filter((symbol) => !isNseEquitySymbol(symbol));
+    const nseIndexSymbols = uniqueSymbols.filter((symbol) => NSE_LIVE_INDEX_SYMBOLS.has(symbol));
+    const otherSymbols = uniqueSymbols.filter((symbol) => !isNseEquitySymbol(symbol) && !NSE_LIVE_INDEX_SYMBOLS.has(symbol));
     const quotes: Quote[] = [];
 
     if (nseSymbols.length > 0) {
@@ -172,6 +183,33 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
         }
         if (quotes.length === 0 && nseError instanceof Error) {
           console.error("NSELive quote service failed:", nseError.message);
+        }
+      }
+    }
+
+    if (nseIndexSymbols.length > 0) {
+      try {
+        // NSE's own allIndices feed is the primary source for NSE-family
+        // indices (Nifty 50, Nifty Bank, India VIX). SENSEX never reaches
+        // here since it isn't in NSE_LIVE_INDEX_SYMBOLS.
+        const nseIndexResult = await fetchNseLiveIndices(nseIndexSymbols);
+        quotes.push(...nseIndexResult.quotes.map(nseQuoteToQuote));
+        const failedIndex = nseIndexSymbols.filter(
+          (requested) => !nseIndexResult.quotes.some((quote) => quote.symbol === requested),
+        );
+        if (failedIndex.length > 0) {
+          try { quotes.push(...await yahooQuotes(failedIndex)); } catch { /* keep successful NSE index quotes */ }
+        }
+      } catch (nseIndexError) {
+        try {
+          quotes.push(...await yahooQuotes(nseIndexSymbols));
+        } catch {
+          if (TWELVE_DATA_API_KEY) {
+            try { quotes.push(...await twelveDataQuotes(nseIndexSymbols)); } catch { /* return empty/partial quotes */ }
+          }
+        }
+        if (nseIndexError instanceof Error) {
+          console.error("NSELive index service failed:", nseIndexError.message);
         }
       }
     }
