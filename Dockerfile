@@ -2,6 +2,7 @@ FROM node:22-bookworm
 
 ENV NITRO_HOST=0.0.0.0
 ENV HOST=0.0.0.0
+ENV NITRO_PRESET=node-server
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 python3-pip \
