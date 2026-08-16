@@ -20,4 +20,4 @@ RUN npm run build
 
 EXPOSE 3000
 
-CMD ["node", ".output/server/index.mjs"]
+CMD ["sh", "-c", "export PORT=\"${PORT:-3000}\"; export NITRO_PORT=\"${PORT}\"; export NITRO_HOST=0.0.0.0; export HOST=0.0.0.0; exec node .output/server/index.mjs"]
