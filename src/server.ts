@@ -18,6 +18,34 @@ async function getServerEntry(): Promise<ServerEntry> {
   return serverEntryPromise;
 }
 
+function healthResponse(request: Request): Response {
+  const body = JSON.stringify({
+    status: "ok",
+    service: "india-stock-guru",
+    timestamp: new Date().toISOString(),
+  });
+
+  // Railway healthchecks only need a fast, dependency-free 200 response.
+  // Keep this endpoint independent from SSR, market-data providers, and AI services.
+  if (request.method === "HEAD") {
+    return new Response(null, {
+      status: 200,
+      headers: {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      },
+    });
+  }
+
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
+  });
+}
+
 // h3 swallows in-handler throws into a normal 500 Response with body
 // {"unhandled":true,"message":"HTTPError"} — try/catch alone never fires for those.
 async function normalizeCatastrophicSsrResponse(response: Response): Promise<Response> {
@@ -47,6 +75,13 @@ function isH3SwallowedErrorBody(body: string): boolean {
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
+      // Handle Railway's healthcheck before loading the application server.
+      // This makes /health fast and reliable even if SSR or an external provider is down.
+      const url = new URL(request.url);
+      if (url.pathname === "/health" && (request.method === "GET" || request.method === "HEAD")) {
+        return healthResponse(request);
+      }
+
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
       return await normalizeCatastrophicSsrResponse(response);
