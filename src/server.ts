@@ -25,8 +25,6 @@ function healthResponse(request: Request): Response {
     timestamp: new Date().toISOString(),
   });
 
-  // Railway healthchecks only need a fast, dependency-free 200 response.
-  // Keep this endpoint independent from SSR, market-data providers, and AI services.
   if (request.method === "HEAD") {
     return new Response(null, {
       status: 200,
@@ -46,8 +44,6 @@ function healthResponse(request: Request): Response {
   });
 }
 
-// h3 swallows in-handler throws into a normal 500 Response with body
-// {"unhandled":true,"message":"HTTPError"} — try/catch alone never fires for those.
 async function normalizeCatastrophicSsrResponse(response: Response): Promise<Response> {
   if (response.status < 500) return response;
   const contentType = response.headers.get("content-type") ?? "";
@@ -75,8 +71,6 @@ function isH3SwallowedErrorBody(body: string): boolean {
 export default {
   async fetch(request: Request, env: unknown, ctx: unknown) {
     try {
-      // Handle Railway's healthcheck before loading the application server.
-      // This makes /health fast and reliable even if SSR or an external provider is down.
       const url = new URL(request.url);
       if (url.pathname === "/health" && (request.method === "GET" || request.method === "HEAD")) {
         return healthResponse(request);
