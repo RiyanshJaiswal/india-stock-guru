@@ -71,10 +71,11 @@ function runPythonWithExecutable(payload: string, executable: string): Promise<N
       else resolve(result ?? { quotes: [], errors: [] });
     };
 
+    // Bound cloud/NSE stalls so the existing Yahoo recovery path can engage.
     const timeout = setTimeout(() => {
       child.kill();
       finish(new Error("NSE data service timed out"));
-    }, 20_000);
+    }, 7_000);
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
