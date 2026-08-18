@@ -150,7 +150,7 @@ async function fetchMarketauxNews(limit: number, search: string, date?: string):
   const apiToken = process.env.MARKETAUX_API_TOKEN?.trim();
   if (!apiToken) return [];
   const bounds = dayBoundsUtc(date);
-  const params = new URLSearchParams({ api_token: apiToken, countries: "in", language: "en", filter_entities: "true", sort: "published_at", limit: String(Math.min(limit, 50)) });
+  const params = new URLSearchParams({ api_token: apiToken, countries: "in", language: "en", filter_entities: "true", must_have_entities: "true", sort: "published_at", limit: String(Math.min(Math.max(limit, 10), 50)) });
   if (search) params.set("search", search);
   if (bounds.after) params.set("published_after", bounds.after);
   if (bounds.before) params.set("published_before", bounds.before);
@@ -172,7 +172,7 @@ async function fetchNewsApiNews(limit: number, search: string, date?: string): P
   const apiToken = process.env.NEWSAPI_API_KEY?.trim();
   if (!apiToken) return [];
   const bounds = dayBoundsUtc(date);
-  const params = new URLSearchParams({ q: searchTerms(search), language: "en", sortBy: "publishedAt", pageSize: String(Math.min(limit, 50)), apiKey: apiToken });
+  const params = new URLSearchParams({ q: searchTerms(search), searchIn: search ? "title,description" : "title,description,content", language: "en", sortBy: "publishedAt", pageSize: String(Math.min(Math.max(limit, 10), 50)), apiKey: apiToken });
   if (bounds.after) params.set("from", bounds.after);
   if (bounds.before) params.set("to", bounds.before);
   if (!date) params.set("from", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
@@ -193,7 +193,7 @@ async function fetchGNews(limit: number, search: string, date?: string): Promise
   const apiToken = process.env.GNEWS_API_KEY?.trim();
   if (!apiToken) return [];
   const bounds = dayBoundsUtc(date);
-  const params = new URLSearchParams({ q: searchTerms(search), country: "in", lang: "en", max: String(Math.min(limit, 10)), apikey: apiToken });
+  const params = new URLSearchParams({ q: searchTerms(search), country: "in", lang: "en", max: String(Math.min(Math.max(limit, 10), 10)), apikey: apiToken });
   if (bounds.after) params.set("from", bounds.after);
   if (bounds.before) params.set("to", bounds.before);
   if (!date) params.set("from", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
@@ -222,7 +222,7 @@ async function fetchAllRssNews(search: string, date?: string): Promise<MarketNew
   return feeds.flat().filter((item) => {
     const time = new Date(item.publishedAt).getTime();
     const inRange = Number.isFinite(time) && time >= after && time <= before;
-    const matches = !needle || `${item.headline} ${item.source}`.toLowerCase().includes(needle);
+    const matches = !needle || item.headline.toLowerCase().includes(needle);
     return inRange && matches;
   });
 }
