@@ -76,7 +76,7 @@ export function AiAssistant({ activeSymbol, activeQuote, portfolioPositions = []
 
   return (
     <>
-      <section className="panel flex h-[360px] min-h-0 flex-col p-4 md:h-[340px]" aria-label="AI assistant">
+      <section className="panel flex h-full min-h-[340px] min-w-0 flex-col overflow-hidden p-4" aria-label="AI assistant">
         <header className="flex min-w-0 items-center gap-2">
           <span className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-primary/15 text-primary"><Bot className="h-4 w-4" /></span>
           <div className="min-w-0"><h2 className="truncate text-sm font-bold tracking-widest uppercase">AI Assistant</h2><p className="truncate text-xs text-muted-foreground">Market copilot · {stripSuffix(activeSymbol)} context</p></div>
