@@ -26,11 +26,36 @@ function buildQuery(query: NewsQuery, site: string | null): string {
   // Phrase-quote the company so publisher-scoped feeds stay on-topic.
   const base = name
     ? query.ticker && !name.toUpperCase().includes(query.ticker)
-      ? `("${name}" OR "${query.ticker}")`
-      : `"${name}"`
+      ? `(\"${name}\" OR \"${query.ticker}\")`
+      : `\"${name}\"`
     : "Indian stock market";
   return site ? `${base} site:${site}` : `${base} when:14d`;
+}
 
+/**
+ * Google News is intentionally fuzzy: for example a search for "reliance"
+ * can return an article containing "reliant" or an article whose body merely
+ * mentions Reliance. That is useful for general web search, but wrong for a
+ * stock-news page. Keep only articles whose headline contains an exact
+ * company/ticker token. This also prevents unrelated results such as an
+ * ICICI Bank headline from appearing in a RELIANCE search.
+ */
+function headlineMatchesCompany(title: string, query: NewsQuery): boolean {
+  const headline = title.toLocaleLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!headline) return false;
+
+  const candidates = [
+    query.ticker,
+    query.query,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .map((value) => value.toLocaleLowerCase().replace(/\.(ns|bo)$/i, "").replace(/[^a-z0-9]+/g, " ").trim())
+    .filter((value) => value.length >= 2);
+
+  return candidates.some((candidate) => {
+    const pattern = new RegExp(`(?:^| )${candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:$| )`, "i");
+    return pattern.test(headline);
+  });
 }
 
 function companyRef(query: NewsQuery, name: string | null): CompanyRef {
@@ -61,6 +86,11 @@ async function fetchGoogleNews(
     if (since && publishedAt && Date.parse(publishedAt) < since) continue;
     const link = unwrapGoogleLink(item.link);
     if (site && !linkMatchesSite(link, item.sourceName, site)) continue;
+
+    // For a company/ticker search, do not trust Google's fuzzy ranking alone.
+    // The headline must explicitly identify the requested company/ticker.
+    if ((query.symbol || query.query) && !headlineMatchesCompany(item.title, query)) continue;
+
     articles.push({
       title: item.title,
       summary: item.description,
