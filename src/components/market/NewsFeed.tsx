@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import { RefreshCw } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
@@ -14,12 +15,7 @@ function formatDate(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "Date unavailable";
   return new Intl.DateTimeFormat("en-IN", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
+    day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: true,
   }).format(date);
 }
 
@@ -41,19 +37,19 @@ export function NewsFeed() {
     <section className="panel p-4" aria-label="Market news">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-sm font-bold tracking-widest uppercase">Market News</h2>
+          <Link to="/news" className="group inline-block">
+            <h2 className="text-sm font-bold tracking-widest uppercase group-hover:text-primary">Market News</h2>
+          </Link>
           <p className="mt-1 text-xs text-muted-foreground">Latest Indian market news · past 24 hours</p>
         </div>
-        <button
-          type="button"
-          aria-label="Refresh market news"
-          title="Refresh market news"
-          onClick={() => void refetch()}
-          disabled={isFetching}
-          className="cursor-pointer rounded-xl border border-border bg-surface-2/70 p-2 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
-        </button>
+        <div className="flex items-center gap-2">
+          <Link to="/news" className="hidden rounded-lg px-2 py-1 text-xs font-semibold text-muted-foreground hover:bg-surface-2 hover:text-foreground sm:inline-flex">
+            More
+          </Link>
+          <button type="button" aria-label="Refresh market news" title="Refresh market news" onClick={() => void refetch()} disabled={isFetching} className="cursor-pointer rounded-xl border border-border bg-surface-2/70 p-2 text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-60">
+            <RefreshCw className={cn("h-4 w-4", isFetching && "animate-spin")} />
+          </button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -61,45 +57,25 @@ export function NewsFeed() {
       ) : isError ? (
         <div className="mt-4 flex items-center justify-between gap-3 rounded-lg bg-surface-2 px-3 py-2 text-sm text-muted-foreground">
           <span>Market news is temporarily unavailable.</span>
-          <button type="button" onClick={() => void refetch()} className="font-semibold text-foreground hover:underline">
-            Retry
-          </button>
+          <button type="button" onClick={() => void refetch()} className="font-semibold text-foreground hover:underline">Retry</button>
         </div>
       ) : news.length === 0 ? (
-        <p className="mt-4 text-sm text-muted-foreground">No recent market news available.</p>
+        <div className="mt-4 flex items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">No recent market news available.</p>
+          <Link to="/news" className="text-xs font-semibold text-primary hover:underline">Open News</Link>
+        </div>
       ) : (
         <ul className="mt-3 divide-y divide-border">
           {news.map((item) => (
             <li key={item.id} className="py-3 first:pt-1">
               <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
-                <a
-                  href={item.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="min-w-0 text-sm leading-snug font-medium hover:underline"
-                >
-                  {item.headline}
-                </a>
-                <span
-                  className={cn(
-                    "shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase",
-                    toneClass[item.sentiment],
-                  )}
-                >
-                  {item.sentiment}
-                </span>
+                <a href={item.url} target="_blank" rel="noreferrer" className="min-w-0 text-sm leading-snug font-medium hover:underline">{item.headline}</a>
+                <span className={cn("shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold tracking-wide uppercase", toneClass[item.sentiment])}>{item.sentiment}</span>
               </div>
               <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                <span>{item.source}</span>
-                <span aria-hidden>·</span>
-                <time dateTime={item.publishedAt} title={formatDate(item.publishedAt)}>
-                  {formatDate(item.publishedAt)} · {formatRelative(item.publishedAt)}
-                </time>
-                {item.tickers.map((ticker) => (
-                  <span key={ticker} className="num rounded bg-surface-2 px-1.5 py-0.5 text-[10px]">
-                    {ticker}
-                  </span>
-                ))}
+                <span>{item.source}</span><span aria-hidden>·</span>
+                <time dateTime={item.publishedAt} title={formatDate(item.publishedAt)}>{formatDate(item.publishedAt)} · {formatRelative(item.publishedAt)}</time>
+                {item.tickers.map((ticker) => <span key={ticker} className="num rounded bg-surface-2 px-1.5 py-0.5 text-[10px]">{ticker}</span>)}
               </p>
             </li>
           ))}
