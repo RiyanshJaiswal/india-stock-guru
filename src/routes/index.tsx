@@ -86,12 +86,12 @@ function Dashboard() {
 
         <MarketOverview />
 
-        <div className="grid gap-4 lg:grid-cols-3">
+        <div className="grid items-stretch gap-4 lg:grid-cols-3">
           <div className="space-y-4 lg:col-span-2">
             <ChartPanel quote={activeQuote} symbol={activeSymbol} isLoading={isLoading} />
             <Portfolio />
           </div>
-          <div className="space-y-4">
+          <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4">
             <Watchlist
               symbols={watchlist}
               activeSymbol={activeSymbol}
