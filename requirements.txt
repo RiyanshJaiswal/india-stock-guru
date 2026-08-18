@@ -1,1 +1,1 @@
-jugaad-data==0.33.1
+jugaad-data==0.34.0
