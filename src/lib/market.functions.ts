@@ -25,11 +25,21 @@ export const getQuotes = createServerFn({ method: "GET" })
     const { providerQuotes } = await import("./market-data.server");
     const quotes = await providerQuotes(data.symbols);
 
+    // Recover only a missing opening price. NSE remains the primary source;
+    // Yahoo is used as a narrow field-level fallback and never replaces the
+    // rest of the NSE quote.
+    const missingOpen = quotes.filter((quote) => quote.open === null && !quote.symbol.startsWith("^"));
+    const recoveredOpen = await Promise.all(
+      missingOpen.map(async (quote) => [quote.symbol, await import("./open-price.server").then(({ fetchYahooOpenPrice }) => fetchYahooOpenPrice(quote.symbol))] as const),
+    );
+    const openBySymbol = new Map(recoveredOpen);
+
     // Some NSE payload variants include previousClose but omit explicit
     // change/changePercent fields. Derive them from the same quote rather
     // than showing a misleading blank value in the dashboard.
     return quotes.map((quote) => {
-      if (quote.change !== null && quote.changePercent !== null) return quote;
+      const open = quote.open ?? openBySymbol.get(quote.symbol) ?? null;
+      if (quote.change !== null && quote.changePercent !== null && open === quote.open) return quote;
       const change = quote.change ?? (
         quote.price !== null && quote.previousClose !== null
           ? quote.price - quote.previousClose
@@ -40,6 +50,6 @@ export const getQuotes = createServerFn({ method: "GET" })
           ? (change / quote.previousClose) * 100
           : null
       );
-      return { ...quote, change, changePercent };
+      return { ...quote, open, change, changePercent };
     });
   });
