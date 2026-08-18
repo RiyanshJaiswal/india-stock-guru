@@ -58,3 +58,11 @@ export const marketNewsQuery = () =>
     staleTime: 2 * 60_000,
     refetchOnWindowFocus: false,
   });
+
+export const marketNewsArchiveQuery = (date: string, search: string) =>
+  queryOptions({
+    queryKey: ["market-news-archive", date, search],
+    queryFn: () => getMarketNews({ data: { limit: 50, date, search } }),
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+  });
