@@ -1,23 +1,75 @@
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Pencil, Plus, Trash2, X } from "lucide-react";
 
-import { positions, inr } from "@/data/market";
+import type { Position } from "@/data/market";
+import { inr } from "@/data/market";
 import { quotesQuery } from "@/lib/market-queries";
 import { num, signed, stripSuffix } from "@/lib/market-types";
 import { Delta } from "./Delta";
 import { StatTile } from "./StatTile";
 import { cn } from "@/lib/utils";
 
+const STORAGE_KEY = "dalal-desk.portfolio.v1";
+const MAX_DASHBOARD_ROWS = 6;
+
+function normalizeSymbol(value: string): string {
+  const raw = value.trim().toUpperCase().replace(/^NSE:/, "");
+  if (!raw) return "";
+  if (raw.endsWith(".NS") || raw.endsWith(".BO")) return raw;
+  return `${raw}.NS`;
+}
+
+function readPositions(): Position[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (p): p is Position =>
+        typeof p?.symbol === "string" &&
+        typeof p?.quantity === "number" &&
+        p.quantity > 0 &&
+        typeof p?.avgPrice === "number" &&
+        p.avgPrice > 0,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function savePositions(value: Position[]) {
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(value));
+}
+
 export function Portfolio() {
-  const symbols = positions.map((p) => p.symbol);
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [ready, setReady] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showMore, setShowMore] = useState(false);
+  const [editingSymbol, setEditingSymbol] = useState<string | null>(null);
+  const [symbol, setSymbol] = useState("");
+  const [quantity, setQuantity] = useState("");
+  const [avgPrice, setAvgPrice] = useState("");
+  const [formError, setFormError] = useState("");
+
+  useEffect(() => {
+    setPositions(readPositions());
+    setReady(true);
+  }, []);
+
+  const symbols = useMemo(() => positions.map((p) => p.symbol), [positions]);
   const { data } = useQuery(quotesQuery(symbols));
 
   const rows = positions.map((position) => {
-    const ltp = data?.find((q) => q.symbol === position.symbol)?.price ?? null;
+    const quote = data?.find((q) => q.symbol === position.symbol);
+    const ltp = quote?.price ?? null;
     const invested = position.avgPrice * position.quantity;
     const current = ltp === null ? null : ltp * position.quantity;
     return {
       ...position,
       ltp,
+      name: quote?.name ?? "—",
       invested,
       current,
       gain: current === null ? null : current - invested,
@@ -26,16 +78,103 @@ export function Portfolio() {
   });
 
   const invested = rows.reduce((sum, r) => sum + r.invested, 0);
-  const priced = rows.every((r) => r.current !== null);
+  const priced = rows.length > 0 && rows.every((r) => r.current !== null);
   const current = priced ? rows.reduce((sum, r) => sum + (r.current ?? 0), 0) : null;
   const pnl = current === null ? null : current - invested;
-  const pnlPercent = pnl === null ? null : (pnl / invested) * 100;
+  const pnlPercent = pnl === null || invested === 0 ? null : (pnl / invested) * 100;
+  const visibleRows = rows.slice(0, MAX_DASHBOARD_ROWS);
+
+  const persist = (next: Position[]) => {
+    setPositions(next);
+    savePositions(next);
+  };
+
+  const resetForm = () => {
+    setSymbol("");
+    setQuantity("");
+    setAvgPrice("");
+    setEditingSymbol(null);
+    setFormError("");
+  };
+
+  const openAdd = () => {
+    resetForm();
+    setShowAdd(true);
+  };
+
+  const openEdit = (position: Position) => {
+    setSymbol(stripSuffix(position.symbol));
+    setQuantity(String(position.quantity));
+    setAvgPrice(String(position.avgPrice));
+    setEditingSymbol(position.symbol);
+    setFormError("");
+    setShowMore(false);
+    setShowAdd(true);
+  };
+
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const normalized = normalizeSymbol(symbol);
+    const qty = Number(quantity);
+    const price = Number(avgPrice);
+
+    if (!normalized || !Number.isFinite(qty) || qty <= 0 || !Number.isFinite(price) || price <= 0) {
+      setFormError("Stock symbol, quantity aur buy price valid enter karo.");
+      return;
+    }
+
+    if (editingSymbol) {
+      persist(
+        positions.map((p) =>
+          p.symbol === editingSymbol ? { symbol: normalized, quantity: qty, avgPrice: price } : p,
+        ),
+      );
+    } else {
+      const existing = positions.find((p) => p.symbol === normalized);
+      if (existing) {
+        const totalQty = existing.quantity + qty;
+        const weightedAvg =
+          (existing.quantity * existing.avgPrice + qty * price) / totalQty;
+        persist(
+          positions.map((p) =>
+            p.symbol === normalized
+              ? { ...p, quantity: totalQty, avgPrice: Number(weightedAvg.toFixed(4)) }
+              : p,
+          ),
+        );
+      } else {
+        persist([...positions, { symbol: normalized, quantity: qty, avgPrice: price }]);
+      }
+    }
+
+    setShowAdd(false);
+    resetForm();
+  };
+
+  const remove = (positionSymbol: string) => {
+    persist(positions.filter((p) => p.symbol !== positionSymbol));
+  };
 
   return (
     <section className="panel p-4 sm:p-5" aria-label="Portfolio">
       <header className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
-        <h2 className="truncate text-sm font-bold tracking-widest uppercase">Portfolio</h2>
-        <Delta className="shrink-0" changePercent={pnlPercent} />
+        <div className="min-w-0">
+          <h2 className="truncate text-sm font-bold tracking-widest uppercase">Portfolio</h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Your holdings · saved on this device
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {ready && positions.length > 0 && <Delta className="shrink-0" changePercent={pnlPercent} />}
+          <button
+            type="button"
+            onClick={openAdd}
+            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-xs font-semibold text-primary transition-colors hover:bg-primary/15"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            Add holding
+          </button>
+        </div>
       </header>
 
       <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
@@ -48,45 +187,186 @@ export function Portfolio() {
         />
       </div>
 
-      <div className="mt-4 -mx-1 overflow-x-auto">
-        <table className="w-full min-w-[34rem] border-separate border-spacing-y-1 px-1 text-sm">
-          <thead>
-            <tr className="text-left text-[11px] tracking-wider text-muted-foreground uppercase">
-              <th className="font-medium">Stock</th>
-              <th className="text-right font-medium">Qty</th>
-              <th className="text-right font-medium">Avg</th>
-              <th className="text-right font-medium">LTP</th>
-              <th className="text-right font-medium">P&L</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.symbol} className="bg-surface-2/50">
-                <td className="rounded-l-lg px-3 py-2.5">
-                  <p className="font-semibold">{stripSuffix(row.symbol)}</p>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {data?.find((q) => q.symbol === row.symbol)?.name ?? "—"}
-                  </p>
-                </td>
-                <td className="num px-2 text-right">{row.quantity}</td>
-                <td className="num px-2 text-right text-muted-foreground">{num(row.avgPrice)}</td>
-                <td className="num px-2 text-right">{num(row.ltp)}</td>
-                <td
-                  className={cn(
-                    "num rounded-r-lg px-3 text-right font-semibold",
-                    row.gain === null ? "text-muted-foreground" : row.gain >= 0 ? "text-bull" : "text-bear",
-                  )}
-                >
-                  {signed(row.gain, 0)}
-                  <span className="block text-[11px] font-medium opacity-80">
-                    {row.gainPct === null ? "" : `${signed(row.gainPct)}%`}
-                  </span>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {!ready ? (
+        <div className="mt-5 rounded-xl bg-surface-2/50 px-4 py-8 text-center text-sm text-muted-foreground">
+          Loading portfolio…
+        </div>
+      ) : positions.length === 0 ? (
+        <div className="mt-5 rounded-xl border border-dashed border-border bg-surface-2/30 px-4 py-8 text-center">
+          <p className="text-sm font-semibold">No holdings added yet</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Add the stocks you actually own to track quantity, average buy price and live P&L.
+          </p>
+          <button
+            type="button"
+            onClick={openAdd}
+            className="mt-4 inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground"
+          >
+            <Plus className="h-3.5 w-3.5" /> Add your first holding
+          </button>
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 -mx-1 overflow-x-auto">
+            <table className="w-full min-w-[34rem] border-separate border-spacing-y-1 px-1 text-sm">
+              <thead>
+                <tr className="text-left text-[11px] tracking-wider text-muted-foreground uppercase">
+                  <th className="font-medium">Stock</th>
+                  <th className="text-right font-medium">Qty</th>
+                  <th className="text-right font-medium">Avg</th>
+                  <th className="text-right font-medium">LTP</th>
+                  <th className="text-right font-medium">P&L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRows.map((row) => (
+                  <tr key={row.symbol} className="bg-surface-2/50">
+                    <td className="rounded-l-lg px-3 py-2.5">
+                      <p className="font-semibold">{stripSuffix(row.symbol)}</p>
+                      <p className="truncate text-xs text-muted-foreground">{row.name}</p>
+                    </td>
+                    <td className="num px-2 text-right">{row.quantity}</td>
+                    <td className="num px-2 text-right text-muted-foreground">{num(row.avgPrice)}</td>
+                    <td className="num px-2 text-right">{num(row.ltp)}</td>
+                    <td
+                      className={cn(
+                        "num rounded-r-lg px-3 text-right font-semibold",
+                        row.gain === null ? "text-muted-foreground" : row.gain >= 0 ? "text-bull" : "text-bear",
+                      )}
+                    >
+                      {signed(row.gain, 0)}
+                      <span className="block text-[11px] font-medium opacity-80">
+                        {row.gainPct === null ? "" : `${signed(row.gainPct)}%`}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {rows.length > MAX_DASHBOARD_ROWS && (
+            <button
+              type="button"
+              onClick={() => setShowMore(true)}
+              className="mt-3 w-full cursor-pointer rounded-lg border border-border bg-surface-2/40 py-2 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground"
+            >
+              More · {rows.length - MAX_DASHBOARD_ROWS} additional holding{rows.length - MAX_DASHBOARD_ROWS === 1 ? "" : "s"}
+            </button>
+          )}
+        </>
+      )}
+
+      {showAdd && (
+        <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+          <form onSubmit={submit} className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-2xl">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold">{editingSymbol ? "Edit holding" : "Add holding"}</h3>
+                <p className="mt-1 text-xs text-muted-foreground">Enter what you actually bought.</p>
+              </div>
+              <button type="button" onClick={() => { setShowAdd(false); resetForm(); }} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label="Close">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-5 grid gap-4">
+              <label className="grid gap-1.5 text-xs font-semibold">
+                Stock symbol
+                <input
+                  value={symbol}
+                  onChange={(e) => setSymbol(e.target.value)}
+                  placeholder="RELIANCE"
+                  autoFocus
+                  className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary"
+                />
+                <span className="font-normal text-muted-foreground">NSE assumed. You can also enter .BO for BSE.</span>
+              </label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className="grid gap-1.5 text-xs font-semibold">
+                  Quantity
+                  <input
+                    type="number"
+                    min="0.0001"
+                    step="any"
+                    value={quantity}
+                    onChange={(e) => setQuantity(e.target.value)}
+                    placeholder="24"
+                    className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-xs font-semibold">
+                  Buy price / share
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={avgPrice}
+                    onChange={(e) => setAvgPrice(e.target.value)}
+                    placeholder="2710.50"
+                    className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary"
+                  />
+                </label>
+              </div>
+              {formError && <p className="text-xs font-medium text-bear">{formError}</p>}
+            </div>
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button type="button" onClick={() => { setShowAdd(false); resetForm(); }} className="cursor-pointer rounded-lg border border-border px-4 py-2 text-xs font-semibold text-muted-foreground hover:text-foreground">
+                Cancel
+              </button>
+              <button type="submit" className="cursor-pointer rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground">
+                {editingSymbol ? "Save changes" : "Add holding"}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showMore && (
+        <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+          <div className="w-full max-w-2xl rounded-2xl border border-border bg-background p-5 shadow-2xl">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-base font-bold">All holdings</h3>
+                <p className="mt-1 text-xs text-muted-foreground">{rows.length} holdings in your portfolio.</p>
+              </div>
+              <button type="button" onClick={() => setShowMore(false)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label="Close">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mt-4 max-h-[60vh] overflow-auto rounded-xl border border-border/70">
+              {rows.map((row) => (
+                <div key={row.symbol} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-border/60 px-3 py-3 last:border-0">
+                  <div className="min-w-0">
+                    <p className="font-semibold">{stripSuffix(row.symbol)}</p>
+                    <p className="truncate text-xs text-muted-foreground">{row.name}</p>
+                  </div>
+                  <div className="text-right text-xs">
+                    <p className="num">{row.quantity} × {num(row.avgPrice)}</p>
+                    <p className={cn("num", row.gain === null ? "text-muted-foreground" : row.gain >= 0 ? "text-bull" : "text-bear")}>{signed(row.gain, 0)}</p>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <button type="button" onClick={() => openEdit(row)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label={`Edit ${stripSuffix(row.symbol)}`}>
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                    <button type="button" onClick={() => remove(row.symbol)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-bear/10 hover:text-bear" aria-label={`Remove ${stripSuffix(row.symbol)}`}>
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-4 flex justify-end">
+              <button type="button" onClick={openAdd} className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground">
+                <Plus className="h-3.5 w-3.5" /> Add holding
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
