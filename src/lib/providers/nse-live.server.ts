@@ -117,12 +117,17 @@ function runPythonWithExecutable(payload: string, executable: string): Promise<N
 
 async function runPython(payload: string): Promise<NseServiceResponse> {
   let lastError: Error | null = null;
-  for (const executable of pythonBins) {
-    try {
-      return await runPythonWithExecutable(payload, executable);
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error));
+  // A transient NSE/network failure should not immediately force Yahoo.
+  // Retry the whole bridge once, while keeping the per-attempt 7s hard cap.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    for (const executable of pythonBins) {
+      try {
+        return await runPythonWithExecutable(payload, executable);
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
     }
+    if (attempt === 0) await new Promise((resolve) => setTimeout(resolve, 350));
   }
   throw lastError ?? new Error("No usable Python executable found for NSE data service");
 }
