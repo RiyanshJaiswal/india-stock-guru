@@ -61,7 +61,7 @@ async function yahooChartQuote(requestedSymbol: string): Promise<Quote | null> {
   }
 }
 
-async function fetchPortfolioQuotes(symbols: string[]): Promise<Quote[]> {
+export async function fetchPortfolioQuotes(symbols: string[]): Promise<Quote[]> {
   return withCache(`portfolio-quotes:${[...symbols].sort().join(",")}`, 15_000, async () => {
     let primary: Quote[] = [];
     try {
