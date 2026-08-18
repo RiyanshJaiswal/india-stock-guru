@@ -1,5 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { ArrowLeft, RefreshCw } from "lucide-react";
 
 import { ChartPanel } from "@/components/market/ChartPanel";
@@ -65,7 +66,9 @@ function Shell({ children }: { children: React.ReactNode }) {
 function StockDetails() {
   const { symbol } = Route.useParams();
   const { data: quote, isLoading, isError, refetch, isFetching } = useQuery(quoteQuery(symbol));
+  const [chartOpen, setChartOpen] = useState<number | null>(null);
   const fallbackExchange = exchangeOf(symbol);
+  const effectiveOpen = quote?.open ?? chartOpen;
 
   return (
     <Shell>
@@ -92,6 +95,7 @@ function StockDetails() {
             symbol={symbol}
             isLoading={isLoading}
             linkToDetails={false}
+            onLatestOpen={setChartOpen}
           />
         </div>
 
@@ -125,7 +129,7 @@ function StockDetails() {
             <StatTile label="Volume" value={compactVolume(quote?.volume ?? null)} />
             <StatTile label="Market cap" value={compactInr(quote?.marketCap ?? null)} />
             <StatTile label="Prev close" value={num(quote?.previousClose ?? null)} />
-            <StatTile label="Open" value={num(quote?.open ?? null)} />
+            <StatTile label="Open" value={num(effectiveOpen)} />
           </dl>
 
           <p className="mt-4 text-xs text-muted-foreground">
