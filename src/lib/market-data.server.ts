@@ -6,8 +6,6 @@ import { fetchNseLiveQuotes, fetchNseLiveIndices } from "./providers/nse-live.se
 
 const BASE = "https://query2.finance.yahoo.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
-const TWELVE_DATA_BASE = "https://api.twelvedata.com";
-const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 
 // Index symbols NSE's own allIndices feed can serve directly. SENSEX
 // (^BSESN) is a BSE index and has no NSE-live equivalent, so it always
@@ -18,7 +16,6 @@ type Session = { cookie: string; crumb: string; createdAt: number };
 let session: Session | null = null;
 const LEGACY_SYMBOL_MAP: Record<string, string> = { "TATAMOTORS.NS": "TMCV.NS", "TATAMOTORS.BO": "544569.BO" };
 function providerSymbol(symbol: string): string { return LEGACY_SYMBOL_MAP[symbol.toUpperCase()] ?? symbol; }
-function twelveSymbol(symbol: string): { symbol: string; exchange: string } { const normalized = providerSymbol(symbol); const [ticker, suffix] = normalized.split("."); return { symbol: ticker ?? normalized, exchange: suffix === "BO" ? "BSE" : "NSE" }; }
 function isNseEquitySymbol(symbol: string): boolean { const upper = symbol.toUpperCase(); return !upper.startsWith("^") && !upper.endsWith(".BO"); }
 
 function rangeStartMs(range: Range, endMs = Date.now()): number | null {
@@ -104,8 +101,6 @@ function validateCandles(candles: Candle[], range: Range): Candle[] {
 
 export async function providerSearch(query: string): Promise<SearchResult[]> { return withCache(`search:${query.trim().toLowerCase()}`, 5 * 60_000, async () => { const url = `${BASE}/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=25&newsCount=0&listsCount=0&enableFuzzyQuery=false`; const res = await fetch(url, { headers: { "user-agent": UA, accept: "application/json" } }); if (!res.ok) throw new Error(`Search failed (${res.status})`); const body = (await res.json()) as { quotes?: RawQuote[] }; return (body.quotes ?? []).filter((item) => { const symbol = String(item["symbol"] ?? ""); return item["quoteType"] === "EQUITY" && /\.(NS|BO)$/i.test(symbol) && !/^0P/i.test(symbol); }).slice(0, 12).map((item) => { const symbol = String(item["symbol"]); return { symbol, ticker: stripSuffix(symbol), name: String(item["longname"] ?? item["shortname"] ?? symbol), exchange: exchangeOf(symbol) }; }); }); }
 
-async function twelveDataQuotes(symbols: string[]): Promise<Quote[]> { if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured"); return Promise.all(symbols.map(async (requestedSymbol) => { const { symbol, exchange } = twelveSymbol(requestedSymbol); const url = `${TWELVE_DATA_BASE}/quote?symbol=${encodeURIComponent(symbol)}&exchange=${encodeURIComponent(exchange)}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`; const res = await fetch(url, { headers: { accept: "application/json" } }); if (!res.ok) throw new Error(`Twelve Data quote failed (${res.status})`); const raw = (await res.json()) as Record<string, unknown>; if (String(raw["status"] ?? "ok").toLowerCase() === "error" || raw["code"]) throw new Error(String(raw["message"] ?? "Twelve Data quote error")); const price = Number(raw["close"]); if (!Number.isFinite(price) || price <= 0) throw new Error("Twelve Data returned an invalid quote"); return { symbol: requestedSymbol, ticker: stripSuffix(requestedSymbol), name: String(raw["name"] ?? symbol), exchange, currency: String(raw["currency"] ?? "INR"), marketState: "UNKNOWN", timestamp: null, price, previousClose: nullable(Number(raw["previous_close"])), change: nullable(Number(raw["change"])), changePercent: nullable(Number(raw["percent_change"])), open: nullable(Number(raw["open"])), dayHigh: nullable(Number(raw["high"])), dayLow: nullable(Number(raw["low"])), fiftyTwoWeekHigh: nullable(Number(raw["fifty_two_week"])), fiftyTwoWeekLow: null, volume: nullable(Number(raw["volume"])), marketCap: nullable(Number(raw["market_cap"])) } satisfies Quote; })); }
-
 async function yahooQuotes(symbols: string[]): Promise<Quote[]> {
   if (symbols.length === 0) return [];
   const requestedToProvider = new Map(symbols.map((symbol) => [symbol, providerSymbol(symbol)]));
@@ -167,8 +162,8 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
         const nseResult = await fetchNseLiveQuotes(nseSymbols);
         quotes.push(...nseResult.quotes.map(nseQuoteToQuote));
         const failedNse = nseSymbols.filter((requested) => !nseResult.quotes.some((quote) => quote.symbol === stripSuffix(requested)));
-        if (failedNse.length > 0 && TWELVE_DATA_API_KEY) {
-          try { quotes.push(...await twelveDataQuotes(failedNse)); } catch { /* keep successful NSE quotes */ }
+        if (failedNse.length > 0) {
+          try { quotes.push(...await yahooQuotes(failedNse)); } catch { /* keep successful NSE quotes */ }
         }
       } catch (nseError) {
         // Emergency-only recovery: keep the dashboard usable if the local
@@ -177,9 +172,7 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
         try {
           quotes.push(...await yahooQuotes(nseSymbols));
         } catch {
-          if (TWELVE_DATA_API_KEY) {
-            try { quotes.push(...await twelveDataQuotes(nseSymbols)); } catch { /* return empty/partial quotes */ }
-          }
+          // Return any successful quotes from other providers/symbols.
         }
         if (quotes.length === 0 && nseError instanceof Error) {
           console.error("NSELive quote service failed:", nseError.message);
@@ -204,9 +197,7 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
         try {
           quotes.push(...await yahooQuotes(nseIndexSymbols));
         } catch {
-          if (TWELVE_DATA_API_KEY) {
-            try { quotes.push(...await twelveDataQuotes(nseIndexSymbols)); } catch { /* return empty/partial quotes */ }
-          }
+          // Keep any successful quotes from other sources.
         }
         if (nseIndexError instanceof Error) {
           console.error("NSELive index service failed:", nseIndexError.message);
@@ -216,17 +207,13 @@ export async function providerQuotes(symbols: string[]): Promise<Quote[]> {
 
     if (otherSymbols.length > 0) {
       try { quotes.push(...await yahooQuotes(otherSymbols)); } catch {
-        if (TWELVE_DATA_API_KEY) {
-          try { quotes.push(...await twelveDataQuotes(otherSymbols)); } catch { /* return successful quotes from other sources */ }
-        }
+        // Return successful quotes from other sources/symbols.
       }
     }
 
     return quotes;
   });
 }
-
-async function twelveDataHistory(symbol: string, interval: Interval, range: Range): Promise<Candle[]> { if (!TWELVE_DATA_API_KEY) throw new Error("Twelve Data fallback is not configured"); if (interval !== "1d" || range === "max") throw new Error("Twelve Data fallback supports daily bounded history only"); const outputsize = range === "1mo" ? 31 : range === "3mo" ? 93 : range === "6mo" ? 186 : range === "1y" ? 366 : 730; const { symbol: ticker, exchange } = twelveSymbol(symbol); const url = `${TWELVE_DATA_BASE}/time_series?symbol=${encodeURIComponent(ticker)}&exchange=${encodeURIComponent(exchange)}&interval=1day&outputsize=${outputsize}&apikey=${encodeURIComponent(TWELVE_DATA_API_KEY)}`; const res = await fetch(url, { headers: { accept: "application/json" } }); if (!res.ok) throw new Error(`Twelve Data history failed (${res.status})`); const body = (await res.json()) as { status?: string; message?: string; values?: Array<Record<string, string>> }; if (body.status === "error" || !body.values) throw new Error(body.message ?? "Twelve Data history error"); const candles = body.values.map((v) => ({ time: Date.parse(`${v.datetime}T00:00:00+05:30`), open: Number(v.open), high: Number(v.high), low: Number(v.low), close: Number(v.close), volume: Number(v.volume ?? 0) })).filter((c) => Number.isFinite(c.time) && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close)); return validateCandles(clampToRequestedRange(candles.sort((a, b) => a.time - b.time), range), range); }
 
 async function yahooHistory(symbolForProvider: string, interval: Interval, range: Range): Promise<Candle[]> {
   const endMs = Date.now();
@@ -261,13 +248,8 @@ async function tataMotorsAdjustedHistory(interval: Interval, range: Range): Prom
 
 export async function providerHistory(symbol: string, interval: Interval = "1d", range: Range = "1y"): Promise<Candle[]> {
   return withCache(`history:${providerSymbol(symbol)}:${interval}:${range}`, 5 * 60_000, async () => {
-    try {
-      if (symbol.toUpperCase() === "TATAMOTORS.NS" && interval === "1d") return await tataMotorsAdjustedHistory(interval, range);
-      const candles = await yahooHistory(providerSymbol(symbol), interval, range);
-      return validateCandles(clampToRequestedRange(candles, range), range);
-    } catch (primaryError) {
-      if (!TWELVE_DATA_API_KEY) throw primaryError;
-      return twelveDataHistory(symbol, interval, range);
-    }
+    if (symbol.toUpperCase() === "TATAMOTORS.NS" && interval === "1d") return tataMotorsAdjustedHistory(interval, range);
+    const candles = await yahooHistory(providerSymbol(symbol), interval, range);
+    return validateCandles(clampToRequestedRange(candles, range), range);
   });
 }
