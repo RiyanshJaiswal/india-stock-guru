@@ -132,11 +132,22 @@ def normalize(symbol: str, quote: dict) -> dict:
     volume = first_number(dict_value(trade_info, "quantitytraded"), dict_value(trade_info, "totalTradedVolume"), dict_value(security_wise_dp, "quantityTraded"), quote.get("volume"), deep_number(quote, "quantityTraded", "totalTradedVolume", "volume"))
     market_cap = first_number(dict_value(trade_info, "totalMarketCap"), quote.get("totalMarketCap"), deep_number(quote, "totalMarketCap", "marketCap"))
 
+    # NSE/jugaad-data normally exposes priceInfo.open. New/alternate NSE
+    # payloads may expose the same value under openPrice/open_price/openingPrice.
+    # Keep these fallbacks here so the UI does not lose a valid opening price.
+    opening_price = first_number(
+        dict_value(metadata, "open", "openPrice", "open_price", "openingPrice"),
+        dict_value(price_info, "open", "openPrice", "open_price", "openingPrice"),
+        dict_value(trade_info, "open", "openPrice", "open_price", "openingPrice"),
+        quote.get("open"), quote.get("openPrice"), quote.get("open_price"), quote.get("openingPrice"),
+        deep_number(quote, "open", "openPrice", "open_price", "openingPrice"),
+    )
+
     return {
         "symbol": symbol, "companyName": company_name, "lastPrice": last_price,
         "change": change, "pChange": p_change, "timestamp": timestamp,
         "previousClose": previous_close,
-        "open": first_number(dict_value(metadata, "open"), dict_value(price_info, "open"), quote.get("open"), deep_number(quote, "open")),
+        "open": opening_price,
         "dayHigh": first_number(dict_value(metadata, "dayHigh"), dict_value(price_info, "dayHigh"), dict_value(intra_day, "max"), quote.get("dayHigh"), deep_number(quote, "dayHigh", "high")),
         "dayLow": first_number(dict_value(metadata, "dayLow"), dict_value(price_info, "dayLow"), dict_value(intra_day, "min"), quote.get("dayLow"), deep_number(quote, "dayLow", "low")),
         "fiftyTwoWeekHigh": year_high, "fiftyTwoWeekLow": year_low,
