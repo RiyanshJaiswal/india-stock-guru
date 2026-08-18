@@ -7,6 +7,7 @@
 type CacheEntry<T> = { value: T; expiresAt: number };
 
 const cache = new Map<string, CacheEntry<unknown>>();
+const inFlight = new Map<string, Promise<unknown>>();
 
 export function getCached<T>(key: string): T | undefined {
   const entry = cache.get(key);
@@ -26,8 +27,16 @@ export function setCached<T>(key: string, value: T, ttlMs: number): T {
 export async function withCache<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
   const cached = getCached<T>(key);
   if (cached !== undefined) return cached;
-  const value = await loader();
-  return setCached(key, value, ttlMs);
+
+  const existing = inFlight.get(key);
+  if (existing) return existing as Promise<T>;
+
+  const pending = loader()
+    .then((value) => setCached(key, value, ttlMs))
+    .finally(() => inFlight.delete(key));
+
+  inFlight.set(key, pending);
+  return pending;
 }
 
 export function clearMarketCache(prefix?: string): void {
