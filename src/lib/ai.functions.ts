@@ -37,6 +37,11 @@ Prefer a useful answer in 4-8 short bullets or a compact paragraph, followed by 
 
 const NEWS_CACHE_TTL_MS = 5 * 60_000;
 const newsBriefCache = new Map<string, { value: string; expiresAt: number }>();
+const MAX_CONTEXT_CHARS = 18_000;
+const MAX_NEWS_CHARS = 7_000;
+const MAX_HISTORY_MESSAGES = 12;
+const MAX_HISTORY_MESSAGE_CHARS = 3_000;
+const MAX_REPLY_LENGTH = 8_000;
 
 function getCachedNewsBrief(symbol: string): string | undefined {
   const entry = newsBriefCache.get(symbol);
@@ -54,6 +59,20 @@ function setCachedNewsBrief(symbol: string, value: string): void {
     for (const key of keys) newsBriefCache.delete(key);
   }
   newsBriefCache.set(symbol, { value, expiresAt: Date.now() + NEWS_CACHE_TTL_MS });
+}
+
+function clampText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n… (context truncated)`;
+}
+
+function sanitizeContext(context: Record<string, unknown>): string {
+  try {
+    const serialized = JSON.stringify(context);
+    return clampText(serialized, MAX_CONTEXT_CHARS);
+  } catch {
+    return "{}";
+  }
 }
 
 async function fetchNewsBrief(symbol: string): Promise<string> {
@@ -102,18 +121,16 @@ async function fetchNewsBrief(symbol: string): Promise<string> {
       })
       .join("\n");
 
-    setCachedNewsBrief(symbol, brief);
-    return brief;
+    const bounded = clampText(brief, MAX_NEWS_CHARS);
+    setCachedNewsBrief(symbol, bounded);
+    return bounded;
   } catch {
     return "";
   }
 }
 
-// Gemini can transiently return 503/429 under capacity or rate pressure.
-// Keep retries short so Railway requests do not sit behind a 60s+ chain.
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const REQUEST_TIMEOUT_MS = 8_000;
-const MAX_ATTEMPTS = 3;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -131,20 +148,11 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
 
 function retryDelay(response: Response | null, attempt: number): number {
   const retryAfter = response?.headers.get("retry-after");
-  if (retryAfter) {
-    const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0 && seconds <= 5) {
-      return Math.round(seconds * 1000);
-    }
-    const date = Date.parse(retryAfter);
-    if (Number.isFinite(date)) {
-      const wait = Math.max(0, Math.min(5000, date - Date.now()));
-      return wait;
-    }
-  }
-  // Exponential backoff with small jitter: ~400-700ms, then ~800-1200ms.
-  const base = 400 * 2 ** attempt;
-  return base + Math.floor(Math.random() * 300);
+  const seconds = retryAfter ? Number(retryAfter) : NaN;
+  const serverDelay = Number.isFinite(seconds) && seconds >= 0 ? Math.min(seconds * 1000, 4_000) : 0;
+  const exponential = Math.min(500 * 2 ** attempt, 2_000);
+  const jitter = Math.floor(Math.random() * 250);
+  return Math.max(serverDelay, exponential) + jitter;
 }
 
 async function callChatCompletions(
@@ -152,9 +160,10 @@ async function callChatCompletions(
   apiKey: string,
   payload: Record<string, unknown>,
 ): Promise<Response | null> {
+  const attempts = 3;
   let lastResponse: Response | null = null;
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetchWithTimeout(
         `${baseUrl}/chat/completions`,
@@ -172,28 +181,33 @@ async function callChatCompletions(
       if (response.ok) return response;
       lastResponse = response;
 
-      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS - 1) {
-        return response;
-      }
-
-      await sleep(retryDelay(response, attempt));
+      if (!RETRYABLE_STATUS.has(response.status) || attempt === attempts - 1) return response;
     } catch (error) {
-      if (attempt === MAX_ATTEMPTS - 1) {
-        if (error instanceof Error && error.name === "AbortError") {
-          console.error("AI provider request timed out after 8s");
-        } else {
-          console.error("AI provider network request failed");
-        }
+      if (attempt === attempts - 1) {
+        if (error instanceof Error && error.name === "AbortError") console.error("AI provider request timed out");
         return null;
       }
-      await sleep(retryDelay(null, attempt));
     }
+
+    await sleep(retryDelay(lastResponse, attempt));
   }
 
   return lastResponse;
 }
 
-const MAX_REPLY_LENGTH = 8_000;
+function extractAiContent(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const choices = (body as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return null;
+  const first = choices[0];
+  if (!first || typeof first !== "object") return null;
+  const message = (first as { message?: unknown }).message;
+  if (!message || typeof message !== "object") return null;
+  const content = (message as { content?: unknown }).content;
+  if (typeof content !== "string") return null;
+  const trimmed = content.trim();
+  return trimmed || null;
+}
 
 export const askAi = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => chatInput.parse(data))
@@ -205,10 +219,18 @@ export const askAi = createServerFn({ method: "POST" })
     if (!apiKey || !model) return { mode: "local" as const, content: "" };
 
     const newsBrief = await fetchNewsBrief(data.symbol);
-    const screenContext = `Current screen context (JSON):\n${JSON.stringify({ symbol: data.symbol, ...data.context })}`;
+    const screenContext = `Current screen context (JSON):\n${sanitizeContext({ symbol: data.symbol, ...data.context })}`;
     const newsContext = newsBrief
       ? `Recent verified news for ${data.symbol} (last 14 days, via Google News / exchange feeds):\n${newsBrief}`
       : `Recent verified news for ${data.symbol}: none found in the last 14 days.`;
+
+    const history = data.messages
+      .slice(-MAX_HISTORY_MESSAGES)
+      .map((message) => ({
+        role: message.role,
+        content: clampText(message.content, MAX_HISTORY_MESSAGE_CHARS),
+      }));
+
     const combinedSystemMessage = `${SYSTEM_PROMPT}\n\n${screenContext}\n\n${newsContext}`;
 
     try {
@@ -217,7 +239,7 @@ export const askAi = createServerFn({ method: "POST" })
         temperature: 0.2,
         messages: [
           { role: "system", content: combinedSystemMessage },
-          ...data.messages,
+          ...history,
           { role: "user", content: data.userMessage },
         ],
       });
@@ -227,7 +249,7 @@ export const askAi = createServerFn({ method: "POST" })
         return { mode: "local" as const, content: "" };
       }
 
-      let body: { choices?: Array<{ message?: { content?: string } }> };
+      let body: unknown;
       try {
         body = await response.json();
       } catch {
@@ -235,13 +257,15 @@ export const askAi = createServerFn({ method: "POST" })
         return { mode: "local" as const, content: "" };
       }
 
-      const rawContent = body.choices?.[0]?.message?.content?.trim();
-      if (!rawContent) return { mode: "local" as const, content: "" };
+      const rawContent = extractAiContent(body);
+      if (!rawContent) {
+        console.error("AI provider returned an invalid or empty completion");
+        return { mode: "local" as const, content: "" };
+      }
 
-      const content =
-        rawContent.length > MAX_REPLY_LENGTH
-          ? `${rawContent.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)`
-          : rawContent;
+      const content = rawContent.length > MAX_REPLY_LENGTH
+        ? `${rawContent.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)`
+        : rawContent;
 
       return { mode: "ai" as const, content };
     } catch {
