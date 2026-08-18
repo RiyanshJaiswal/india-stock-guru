@@ -23,5 +23,23 @@ export const getQuotes = createServerFn({ method: "GET" })
   .inputValidator((data: unknown) => quotesInput.parse(data))
   .handler(async ({ data }): Promise<Quote[]> => {
     const { providerQuotes } = await import("./market-data.server");
-    return providerQuotes(data.symbols);
+    const quotes = await providerQuotes(data.symbols);
+
+    // Some NSE payload variants include previousClose but omit explicit
+    // change/changePercent fields. Derive them from the same quote rather
+    // than showing a misleading blank value in the dashboard.
+    return quotes.map((quote) => {
+      if (quote.change !== null && quote.changePercent !== null) return quote;
+      const change = quote.change ?? (
+        quote.price !== null && quote.previousClose !== null
+          ? quote.price - quote.previousClose
+          : null
+      );
+      const changePercent = quote.changePercent ?? (
+        change !== null && quote.previousClose !== null && quote.previousClose !== 0
+          ? (change / quote.previousClose) * 100
+          : null
+      );
+      return { ...quote, change, changePercent };
+    });
   });
