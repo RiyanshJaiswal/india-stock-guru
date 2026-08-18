@@ -3,6 +3,8 @@ import { z } from "zod";
 
 const NEWS_URL = "https://api.marketaux.com/v1/news/all";
 const newsInput = z.object({ limit: z.number().int().min(1).max(10).default(6) });
+const NEWS_CACHE_TTL_MS = 30_000;
+const NEWS_TIMEOUT_MS = 4_000;
 
 export type MarketNewsItem = {
   id: string;
@@ -30,14 +32,14 @@ type MarketauxArticle = {
 
 type MarketauxResponse = { data?: unknown };
 
+let newsCache: { value: MarketNewsItem[]; expiresAt: number } | null = null;
+let inFlightNews: Promise<MarketNewsItem[]> | null = null;
+
 function sentimentFor(entities: unknown): MarketNewsItem["sentiment"] {
   if (!Array.isArray(entities)) return "neutral";
   const scores = entities
-    .map((entity) => {
-      const score = Number((entity as MarketauxEntity).sentiment_score);
-      return Number.isFinite(score) ? score : null;
-    })
-    .filter((score): score is number => score !== null);
+    .map((entity) => Number((entity as MarketauxEntity).sentiment_score))
+    .filter((score): score is number => Number.isFinite(score));
   if (!scores.length) return "neutral";
   const average = scores.reduce((sum, score) => sum + score, 0) / scores.length;
   if (average > 0.1) return "positive";
@@ -55,63 +57,79 @@ function tickersFor(entities: unknown): string[] {
   )].slice(0, 5);
 }
 
+async function fetchMarketauxNews(limit: number): Promise<MarketNewsItem[]> {
+  const apiToken = process.env.MARKETAUX_API_TOKEN?.trim();
+  if (!apiToken) {
+    console.error("MARKETAUX_API_TOKEN is not configured");
+    return [];
+  }
+
+  const publishedAfter = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
+  const params = new URLSearchParams({
+    api_token: apiToken,
+    countries: "in",
+    language: "en",
+    filter_entities: "true",
+    sort: "published_at",
+    limit: String(limit),
+    published_after: publishedAfter,
+  });
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), NEWS_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${NEWS_URL}?${params.toString()}`, {
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      console.error(`Marketaux request failed (${response.status})`);
+      return [];
+    }
+
+    const body = (await response.json()) as MarketauxResponse;
+    if (!Array.isArray(body.data)) return [];
+
+    return body.data
+      .map((raw): MarketNewsItem | null => {
+        const article = raw as MarketauxArticle;
+        const headline = typeof article.title === "string" ? article.title.trim() : "";
+        const publishedAt = typeof article.published_at === "string" ? article.published_at : "";
+        const url = typeof article.url === "string" ? article.url : "";
+        if (!headline || !publishedAt || !url) return null;
+        return {
+          id: typeof article.uuid === "string" ? article.uuid : `${publishedAt}-${headline}`,
+          headline,
+          source: typeof article.source === "string" ? article.source : "Marketaux",
+          publishedAt,
+          url,
+          tickers: tickersFor(article.entities),
+          sentiment: sentimentFor(article.entities),
+        };
+      })
+      .filter((item): item is MarketNewsItem => item !== null);
+  } catch (error) {
+    console.error("Marketaux request error", error instanceof Error ? error.message : error);
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export const getMarketNews = createServerFn({ method: "GET" })
   .inputValidator((data: unknown) => newsInput.parse(data))
   .handler(async ({ data }): Promise<MarketNewsItem[]> => {
-    const apiToken = process.env.MARKETAUX_API_TOKEN?.trim();
-    if (!apiToken) {
-      console.error("MARKETAUX_API_TOKEN is not configured");
-      return [];
-    }
+    if (newsCache && Date.now() < newsCache.expiresAt) return newsCache.value.slice(0, data.limit);
 
-    const publishedAfter = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
-    const params = new URLSearchParams({
-      api_token: apiToken,
-      countries: "in",
-      language: "en",
-      filter_entities: "true",
-      must_have_entities: "true",
-      sort: "published_at",
-      limit: String(data.limit),
-      published_after: publishedAfter,
-    });
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8_000);
-    try {
-      const response = await fetch(`${NEWS_URL}?${params.toString()}`, {
-        headers: { accept: "application/json" },
-        signal: controller.signal,
+    // Deduplicate simultaneous dashboard requests so one page load only makes one Marketaux call.
+    if (!inFlightNews) {
+      inFlightNews = fetchMarketauxNews(data.limit).then((items) => {
+        if (items.length) newsCache = { value: items, expiresAt: Date.now() + NEWS_CACHE_TTL_MS };
+        return items;
+      }).finally(() => {
+        inFlightNews = null;
       });
-      if (!response.ok) {
-        console.error(`Marketaux request failed (${response.status})`);
-        return [];
-      }
-      const body = (await response.json()) as MarketauxResponse;
-      if (!Array.isArray(body.data)) return [];
-
-      return body.data
-        .map((raw): MarketNewsItem | null => {
-          const article = raw as MarketauxArticle;
-          const headline = typeof article.title === "string" ? article.title.trim() : "";
-          const publishedAt = typeof article.published_at === "string" ? article.published_at : "";
-          const url = typeof article.url === "string" ? article.url : "";
-          if (!headline || !publishedAt || !url) return null;
-          return {
-            id: typeof article.uuid === "string" ? article.uuid : `${publishedAt}-${headline}`,
-            headline,
-            source: typeof article.source === "string" ? article.source : "Marketaux",
-            publishedAt,
-            url,
-            tickers: tickersFor(article.entities),
-            sentiment: sentimentFor(article.entities),
-          };
-        })
-        .filter((item): item is MarketNewsItem => item !== null);
-    } catch (error) {
-      console.error("Marketaux request error", error instanceof Error ? error.message : error);
-      return [];
-    } finally {
-      clearTimeout(timeout);
     }
+
+    return inFlightNews;
   });
