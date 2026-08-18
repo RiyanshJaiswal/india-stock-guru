@@ -68,6 +68,24 @@ function normalizeTitle(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
+/**
+ * Search on the news page is company/share search, not general web search.
+ * Providers such as Google News, GNews and NewsAPI can return fuzzy matches
+ * (for example "reliant" for "Reliance") or articles that only mention the
+ * company in their body. Require the searched phrase to occur as a complete
+ * word/phrase in the HEADLINE so unrelated articles cannot leak into results.
+ */
+function headlineMatchesSearch(headline: string, search: string): boolean {
+  const query = normalizeTitle(search);
+  if (!query) return true;
+
+  const title = normalizeTitle(headline);
+  if (!title) return false;
+
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(?:^| )${escaped}(?:$| )`, "i").test(title);
+}
+
 function isValidArticle(item: MarketNewsItem): boolean {
   return Boolean(item.headline && item.publishedAt && item.url);
 }
@@ -218,12 +236,10 @@ async function fetchAllRssNews(search: string, date?: string): Promise<MarketNew
   const bounds = dayBoundsUtc(date);
   const after = bounds.after ? new Date(bounds.after).getTime() : Date.now() - 24 * 60 * 60 * 1000;
   const before = bounds.before ? new Date(bounds.before).getTime() : Date.now();
-  const needle = search.toLowerCase();
   return feeds.flat().filter((item) => {
     const time = new Date(item.publishedAt).getTime();
     const inRange = Number.isFinite(time) && time >= after && time <= before;
-    const matches = !needle || item.headline.toLowerCase().includes(needle);
-    return inRange && matches;
+    return inRange && headlineMatchesSearch(item.headline, search);
   });
 }
 
@@ -234,7 +250,14 @@ async function fetchCombinedIndianStockNews(limit: number, search: string, date?
     fetchGNews(limit, search, date),
     fetchAllRssNews(search, date),
   ]);
-  const merged = [...marketaux, ...newsApi, ...gnews, ...rss].filter(isValidArticle).sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+
+  // Apply the same strict headline rule to every provider. API-side quoted
+  // search is only a relevance hint; it is not a correctness guarantee.
+  const merged = [...marketaux, ...newsApi, ...gnews, ...rss]
+    .filter(isValidArticle)
+    .filter((item) => headlineMatchesSearch(item.headline, search))
+    .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+
   const seen = new Set<string>();
   const unique: MarketNewsItem[] = [];
   for (const item of merged) {
