@@ -13,6 +13,62 @@ import { cn } from "@/lib/utils";
 const STORAGE_KEY = "dalal-desk.portfolio.v1";
 const MAX_DASHBOARD_ROWS = 6;
 
+type StockSuggestion = { symbol: string; name: string };
+
+const STOCK_SUGGESTIONS: StockSuggestion[] = [
+  { symbol: "RELIANCE.NS", name: "Reliance Industries" },
+  { symbol: "TCS.NS", name: "Tata Consultancy Services" },
+  { symbol: "INFY.NS", name: "Infosys" },
+  { symbol: "HDFCBANK.NS", name: "HDFC Bank" },
+  { symbol: "ICICIBANK.NS", name: "ICICI Bank" },
+  { symbol: "SBIN.NS", name: "State Bank of India" },
+  { symbol: "BHARTIARTL.NS", name: "Bharti Airtel" },
+  { symbol: "ITC.NS", name: "ITC" },
+  { symbol: "LT.NS", name: "Larsen & Toubro" },
+  { symbol: "AXISBANK.NS", name: "Axis Bank" },
+  { symbol: "KOTAKBANK.NS", name: "Kotak Mahindra Bank" },
+  { symbol: "HINDUNILVR.NS", name: "Hindustan Unilever" },
+  { symbol: "BAJFINANCE.NS", name: "Bajaj Finance" },
+  { symbol: "MARUTI.NS", name: "Maruti Suzuki India" },
+  { symbol: "TATAMOTORS.NS", name: "Tata Motors" },
+  { symbol: "M&M.NS", name: "Mahindra & Mahindra" },
+  { symbol: "TATASTEEL.NS", name: "Tata Steel" },
+  { symbol: "SUNPHARMA.NS", name: "Sun Pharmaceutical" },
+  { symbol: "ADANIENT.NS", name: "Adani Enterprises" },
+  { symbol: "ADANIPORTS.NS", name: "Adani Ports & SEZ" },
+  { symbol: "NTPC.NS", name: "NTPC" },
+  { symbol: "POWERGRID.NS", name: "Power Grid Corporation" },
+  { symbol: "ONGC.NS", name: "Oil & Natural Gas Corporation" },
+  { symbol: "COALINDIA.NS", name: "Coal India" },
+  { symbol: "JSWSTEEL.NS", name: "JSW Steel" },
+  { symbol: "HCLTECH.NS", name: "HCL Technologies" },
+  { symbol: "WIPRO.NS", name: "Wipro" },
+  { symbol: "TECHM.NS", name: "Tech Mahindra" },
+  { symbol: "TITAN.NS", name: "Titan Company" },
+  { symbol: "ASIANPAINT.NS", name: "Asian Paints" },
+  { symbol: "ULTRACEMCO.NS", name: "UltraTech Cement" },
+  { symbol: "NESTLEIND.NS", name: "Nestle India" },
+  { symbol: "HINDALCO.NS", name: "Hindalco Industries" },
+  { symbol: "CIPLA.NS", name: "Cipla" },
+  { symbol: "DRREDDY.NS", name: "Dr. Reddy's Laboratories" },
+  { symbol: "EICHERMOT.NS", name: "Eicher Motors" },
+  { symbol: "HEROMOTOCO.NS", name: "Hero MotoCorp" },
+  { symbol: "BAJAJFINSV.NS", name: "Bajaj Finserv" },
+  { symbol: "INDUSINDBK.NS", name: "IndusInd Bank" },
+  { symbol: "HDFCLIFE.NS", name: "HDFC Life Insurance" },
+  { symbol: "SBILIFE.NS", name: "SBI Life Insurance" },
+  { symbol: "BEL.NS", name: "Bharat Electronics" },
+  { symbol: "HAL.NS", name: "Hindustan Aeronautics" },
+  { symbol: "IRCTC.NS", name: "IRCTC" },
+  { symbol: "ZOMATO.NS", name: "Eternal (formerly Zomato)" },
+  { symbol: "TRENT.NS", name: "Trent" },
+  { symbol: "DMART.NS", name: "Avenue Supermarts (DMart)" },
+  { symbol: "PIDILITIND.NS", name: "Pidilite Industries" },
+  { symbol: "DLF.NS", name: "DLF" },
+  { symbol: "IOC.NS", name: "Indian Oil Corporation" },
+  { symbol: "GAIL.NS", name: "GAIL India" },
+];
+
 function normalizeSymbol(value: string): string {
   const raw = value.trim().toUpperCase().replace(/^NSE:/, "");
   if (!raw) return "";
@@ -84,6 +140,19 @@ export function Portfolio() {
   const pnlPercent = pnl === null || invested === 0 ? null : (pnl / invested) * 100;
   const visibleRows = rows.slice(0, MAX_DASHBOARD_ROWS);
 
+  const suggestions = useMemo(() => {
+    const query = symbol.trim().toLowerCase();
+    if (!query) return STOCK_SUGGESTIONS.slice(0, 6);
+    return STOCK_SUGGESTIONS
+      .filter((stock) => stock.name.toLowerCase().includes(query) || stock.symbol.toLowerCase().replace(/\.ns$|\.bo$/i, "").includes(query))
+      .sort((a, b) => {
+        const aKey = a.name.toLowerCase().startsWith(query) || a.symbol.toLowerCase().startsWith(query);
+        const bKey = b.name.toLowerCase().startsWith(query) || b.symbol.toLowerCase().startsWith(query);
+        return Number(bKey) - Number(aKey);
+      })
+      .slice(0, 6);
+  }, [symbol]);
+
   const persist = (next: Position[]) => {
     setPositions(next);
     savePositions(next);
@@ -112,6 +181,11 @@ export function Portfolio() {
     setShowAdd(true);
   };
 
+  const selectSuggestion = (stock: StockSuggestion) => {
+    setSymbol(stock.symbol.replace(/\.NS$/i, ""));
+    setFormError("");
+  };
+
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const normalized = normalizeSymbol(symbol);
@@ -124,24 +198,13 @@ export function Portfolio() {
     }
 
     if (editingSymbol) {
-      persist(
-        positions.map((p) =>
-          p.symbol === editingSymbol ? { symbol: normalized, quantity: qty, avgPrice: price } : p,
-        ),
-      );
+      persist(positions.map((p) => p.symbol === editingSymbol ? { symbol: normalized, quantity: qty, avgPrice: price } : p));
     } else {
       const existing = positions.find((p) => p.symbol === normalized);
       if (existing) {
         const totalQty = existing.quantity + qty;
-        const weightedAvg =
-          (existing.quantity * existing.avgPrice + qty * price) / totalQty;
-        persist(
-          positions.map((p) =>
-            p.symbol === normalized
-              ? { ...p, quantity: totalQty, avgPrice: Number(weightedAvg.toFixed(4)) }
-              : p,
-          ),
-        );
+        const weightedAvg = (existing.quantity * existing.avgPrice + qty * price) / totalQty;
+        persist(positions.map((p) => p.symbol === normalized ? { ...p, quantity: totalQty, avgPrice: Number(weightedAvg.toFixed(4)) } : p));
       } else {
         persist([...positions, { symbol: normalized, quantity: qty, avgPrice: price }]);
       }
@@ -158,215 +221,21 @@ export function Portfolio() {
   return (
     <section className="panel p-4 sm:p-5" aria-label="Portfolio">
       <header className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
-        <div className="min-w-0">
-          <h2 className="truncate text-sm font-bold tracking-widest uppercase">Portfolio</h2>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Your holdings · saved on this device
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          {ready && positions.length > 0 && <Delta className="shrink-0" changePercent={pnlPercent} />}
-          <button
-            type="button"
-            onClick={openAdd}
-            className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-xs font-semibold text-primary transition-colors hover:bg-primary/15"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Add holding
-          </button>
-        </div>
+        <div className="min-w-0"><h2 className="truncate text-sm font-bold tracking-widest uppercase">Portfolio</h2><p className="mt-1 text-xs text-muted-foreground">Your holdings · saved on this device</p></div>
+        <div className="flex items-center gap-2">{ready && positions.length > 0 && <Delta className="shrink-0" changePercent={pnlPercent} />}<button type="button" onClick={openAdd} className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-3 py-2 text-xs font-semibold text-primary transition-colors hover:bg-primary/15"><Plus className="h-3.5 w-3.5" />Add holding</button></div>
       </header>
 
-      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-        <StatTile label="Current value" value={current === null ? "—" : inr(current, 0)} />
-        <StatTile label="Invested" value={inr(invested, 0)} />
-        <StatTile
-          label="Overall P&L"
-          value={pnl === null ? "—" : `${pnl >= 0 ? "+" : "−"}${inr(Math.abs(pnl), 0)}`}
-          tone={pnl === null ? undefined : pnl >= 0 ? "bull" : "bear"}
-        />
-      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3"><StatTile label="Current value" value={current === null ? "—" : inr(current, 0)} /><StatTile label="Invested" value={inr(invested, 0)} /><StatTile label="Overall P&L" value={pnl === null ? "—" : `${pnl >= 0 ? "+" : "−"}${inr(Math.abs(pnl), 0)}`} tone={pnl === null ? undefined : pnl >= 0 ? "bull" : "bear"} /></div>
 
-      {!ready ? (
-        <div className="mt-5 rounded-xl bg-surface-2/50 px-4 py-8 text-center text-sm text-muted-foreground">
-          Loading portfolio…
-        </div>
-      ) : positions.length === 0 ? (
-        <div className="mt-5 rounded-xl border border-dashed border-border bg-surface-2/30 px-4 py-8 text-center">
-          <p className="text-sm font-semibold">No holdings added yet</p>
-          <p className="mt-1 text-xs text-muted-foreground">
-            Add the stocks you actually own to track quantity, average buy price and live P&L.
-          </p>
-          <button
-            type="button"
-            onClick={openAdd}
-            className="mt-4 inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground"
-          >
-            <Plus className="h-3.5 w-3.5" /> Add your first holding
-          </button>
-        </div>
+      {!ready ? <div className="mt-5 rounded-xl bg-surface-2/50 px-4 py-8 text-center text-sm text-muted-foreground">Loading portfolio…</div> : positions.length === 0 ? (
+        <div className="mt-5 rounded-xl border border-dashed border-border bg-surface-2/30 px-4 py-8 text-center"><p className="text-sm font-semibold">No holdings added yet</p><p className="mt-1 text-xs text-muted-foreground">Add the stocks you actually own to track quantity, average buy price and live P&L.</p><button type="button" onClick={openAdd} className="mt-4 inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground"><Plus className="h-3.5 w-3.5" />Add your first holding</button></div>
       ) : (
-        <>
-          <div className="mt-4 -mx-1 overflow-x-auto">
-            <table className="w-full min-w-[34rem] border-separate border-spacing-y-1 px-1 text-sm">
-              <thead>
-                <tr className="text-left text-[11px] tracking-wider text-muted-foreground uppercase">
-                  <th className="font-medium">Stock</th>
-                  <th className="text-right font-medium">Qty</th>
-                  <th className="text-right font-medium">Avg</th>
-                  <th className="text-right font-medium">LTP</th>
-                  <th className="text-right font-medium">P&L</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleRows.map((row) => (
-                  <tr key={row.symbol} className="bg-surface-2/50">
-                    <td className="rounded-l-lg px-3 py-2.5">
-                      <p className="font-semibold">{stripSuffix(row.symbol)}</p>
-                      <p className="truncate text-xs text-muted-foreground">{row.name}</p>
-                    </td>
-                    <td className="num px-2 text-right">{row.quantity}</td>
-                    <td className="num px-2 text-right text-muted-foreground">{num(row.avgPrice)}</td>
-                    <td className="num px-2 text-right">{num(row.ltp)}</td>
-                    <td
-                      className={cn(
-                        "num rounded-r-lg px-3 text-right font-semibold",
-                        row.gain === null ? "text-muted-foreground" : row.gain >= 0 ? "text-bull" : "text-bear",
-                      )}
-                    >
-                      {signed(row.gain, 0)}
-                      <span className="block text-[11px] font-medium opacity-80">
-                        {row.gainPct === null ? "" : `${signed(row.gainPct)}%`}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {rows.length > MAX_DASHBOARD_ROWS && (
-            <button
-              type="button"
-              onClick={() => setShowMore(true)}
-              className="mt-3 w-full cursor-pointer rounded-lg border border-border bg-surface-2/40 py-2 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground"
-            >
-              More · {rows.length - MAX_DASHBOARD_ROWS} additional holding{rows.length - MAX_DASHBOARD_ROWS === 1 ? "" : "s"}
-            </button>
-          )}
-        </>
+        <><div className="mt-4 -mx-1 overflow-x-auto"><table className="w-full min-w-[34rem] border-separate border-spacing-y-1 px-1 text-sm"><thead><tr className="text-left text-[11px] tracking-wider text-muted-foreground uppercase"><th className="font-medium">Stock</th><th className="text-right font-medium">Qty</th><th className="text-right font-medium">Avg</th><th className="text-right font-medium">LTP</th><th className="text-right font-medium">P&L</th></tr></thead><tbody>{visibleRows.map((row) => <tr key={row.symbol} className="bg-surface-2/50"><td className="rounded-l-lg px-3 py-2.5"><p className="font-semibold">{stripSuffix(row.symbol)}</p><p className="truncate text-xs text-muted-foreground">{row.name}</p></td><td className="num px-2 text-right">{row.quantity}</td><td className="num px-2 text-right text-muted-foreground">{num(row.avgPrice)}</td><td className="num px-2 text-right">{num(row.ltp)}</td><td className={cn("num rounded-r-lg px-3 text-right font-semibold", row.gain === null ? "text-muted-foreground" : row.gain >= 0 ? "text-bull" : "text-bear")}>{signed(row.gain, 0)}<span className="block text-[11px] font-medium opacity-80">{row.gainPct === null ? "" : `${signed(row.gainPct)}%`}</span></td></tr>)}</tbody></table></div>{rows.length > MAX_DASHBOARD_ROWS && <button type="button" onClick={() => setShowMore(true)} className="mt-3 w-full cursor-pointer rounded-lg border border-border bg-surface-2/40 py-2 text-xs font-semibold text-muted-foreground transition-colors hover:text-foreground">More · {rows.length - MAX_DASHBOARD_ROWS} additional holding{rows.length - MAX_DASHBOARD_ROWS === 1 ? "" : "s"}</button>}</>
       )}
 
-      {showAdd && (
-        <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
-          <form onSubmit={submit} className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-2xl">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h3 className="text-base font-bold">{editingSymbol ? "Edit holding" : "Add holding"}</h3>
-                <p className="mt-1 text-xs text-muted-foreground">Enter what you actually bought.</p>
-              </div>
-              <button type="button" onClick={() => { setShowAdd(false); resetForm(); }} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label="Close">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
+      {showAdd && <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true"><form onSubmit={submit} className="w-full max-w-md rounded-2xl border border-border bg-background p-5 shadow-2xl"><div className="flex items-center justify-between gap-3"><div><h3 className="text-base font-bold">{editingSymbol ? "Edit holding" : "Add holding"}</h3><p className="mt-1 text-xs text-muted-foreground">Enter what you actually bought.</p></div><button type="button" onClick={() => { setShowAdd(false); resetForm(); }} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label="Close"><X className="h-4 w-4" /></button></div><div className="mt-5 grid gap-4"><label className="grid gap-1.5 text-xs font-semibold">Stock symbol<div className="relative"><input value={symbol} onChange={(e) => { setSymbol(e.target.value); setFormError(""); }} placeholder="Search company or symbol…" autoFocus autoComplete="off" className="w-full rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary" />{suggestions.length > 0 && <div className="absolute left-0 right-0 top-[calc(100%+6px)] z-10 overflow-hidden rounded-xl border border-border bg-background shadow-xl"><div className="max-h-60 overflow-y-auto py-1">{suggestions.map((stock) => <button key={stock.symbol} type="button" onMouseDown={(e) => e.preventDefault()} onClick={() => selectSuggestion(stock)} className="flex w-full cursor-pointer items-center justify-between gap-3 px-3 py-2.5 text-left transition-colors hover:bg-surface-2"><span className="min-w-0"><span className="block truncate text-sm font-semibold">{stock.name}</span><span className="block text-[11px] text-muted-foreground">{stock.symbol.replace(/\.NS$/i, "")} · NSE</span></span><span className="shrink-0 text-[10px] text-muted-foreground">Select</span></button>)}</div></div>}</div><span className="font-normal text-muted-foreground">Company name ya symbol ka kuch part type karo, suggestion select karo. NSE assumed; .BO bhi allowed hai.</span></label><div className="grid grid-cols-2 gap-3"><label className="grid gap-1.5 text-xs font-semibold">Quantity<input type="number" min="0.0001" step="any" value={quantity} onChange={(e) => setQuantity(e.target.value)} placeholder="24" className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary" /></label><label className="grid gap-1.5 text-xs font-semibold">Buy price / share<input type="number" min="0.01" step="0.01" value={avgPrice} onChange={(e) => setAvgPrice(e.target.value)} placeholder="2710.50" className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary" /></label></div>{formError && <p className="text-xs font-medium text-bear">{formError}</p>}</div><div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => { setShowAdd(false); resetForm(); }} className="cursor-pointer rounded-lg border border-border px-4 py-2 text-xs font-semibold text-muted-foreground hover:text-foreground">Cancel</button><button type="submit" className="cursor-pointer rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground">{editingSymbol ? "Save changes" : "Add holding"}</button></div></form></div>}
 
-            <div className="mt-5 grid gap-4">
-              <label className="grid gap-1.5 text-xs font-semibold">
-                Stock symbol
-                <input
-                  value={symbol}
-                  onChange={(e) => setSymbol(e.target.value)}
-                  placeholder="RELIANCE"
-                  autoFocus
-                  className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary"
-                />
-                <span className="font-normal text-muted-foreground">NSE assumed. You can also enter .BO for BSE.</span>
-              </label>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="grid gap-1.5 text-xs font-semibold">
-                  Quantity
-                  <input
-                    type="number"
-                    min="0.0001"
-                    step="any"
-                    value={quantity}
-                    onChange={(e) => setQuantity(e.target.value)}
-                    placeholder="24"
-                    className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary"
-                  />
-                </label>
-                <label className="grid gap-1.5 text-xs font-semibold">
-                  Buy price / share
-                  <input
-                    type="number"
-                    min="0.01"
-                    step="0.01"
-                    value={avgPrice}
-                    onChange={(e) => setAvgPrice(e.target.value)}
-                    placeholder="2710.50"
-                    className="rounded-lg border border-border bg-surface-2 px-3 py-2.5 text-sm outline-none focus:border-primary"
-                  />
-                </label>
-              </div>
-              {formError && <p className="text-xs font-medium text-bear">{formError}</p>}
-            </div>
-
-            <div className="mt-5 flex justify-end gap-2">
-              <button type="button" onClick={() => { setShowAdd(false); resetForm(); }} className="cursor-pointer rounded-lg border border-border px-4 py-2 text-xs font-semibold text-muted-foreground hover:text-foreground">
-                Cancel
-              </button>
-              <button type="submit" className="cursor-pointer rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground">
-                {editingSymbol ? "Save changes" : "Add holding"}
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
-      {showMore && (
-        <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true">
-          <div className="w-full max-w-2xl rounded-2xl border border-border bg-background p-5 shadow-2xl">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h3 className="text-base font-bold">All holdings</h3>
-                <p className="mt-1 text-xs text-muted-foreground">{rows.length} holdings in your portfolio.</p>
-              </div>
-              <button type="button" onClick={() => setShowMore(false)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label="Close">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="mt-4 max-h-[60vh] overflow-auto rounded-xl border border-border/70">
-              {rows.map((row) => (
-                <div key={row.symbol} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-border/60 px-3 py-3 last:border-0">
-                  <div className="min-w-0">
-                    <p className="font-semibold">{stripSuffix(row.symbol)}</p>
-                    <p className="truncate text-xs text-muted-foreground">{row.name}</p>
-                  </div>
-                  <div className="text-right text-xs">
-                    <p className="num">{row.quantity} × {num(row.avgPrice)}</p>
-                    <p className={cn("num", row.gain === null ? "text-muted-foreground" : row.gain >= 0 ? "text-bull" : "text-bear")}>{signed(row.gain, 0)}</p>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <button type="button" onClick={() => openEdit(row)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label={`Edit ${stripSuffix(row.symbol)}`}>
-                      <Pencil className="h-3.5 w-3.5" />
-                    </button>
-                    <button type="button" onClick={() => remove(row.symbol)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-bear/10 hover:text-bear" aria-label={`Remove ${stripSuffix(row.symbol)}`}>
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-4 flex justify-end">
-              <button type="button" onClick={openAdd} className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground">
-                <Plus className="h-3.5 w-3.5" /> Add holding
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {showMore && <div className="fixed inset-0 z-[80] grid place-items-center bg-black/60 p-4 backdrop-blur-sm" role="dialog" aria-modal="true"><div className="w-full max-w-2xl rounded-2xl border border-border bg-background p-5 shadow-2xl"><div className="flex items-center justify-between gap-3"><div><h3 className="text-base font-bold">All holdings</h3><p className="mt-1 text-xs text-muted-foreground">{rows.length} holdings in your portfolio.</p></div><button type="button" onClick={() => setShowMore(false)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label="Close"><X className="h-4 w-4" /></button></div><div className="mt-4 max-h-[60vh] overflow-auto rounded-xl border border-border/70">{rows.map((row) => <div key={row.symbol} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-border/60 px-3 py-3 last:border-0"><div className="min-w-0"><p className="font-semibold">{stripSuffix(row.symbol)}</p><p className="truncate text-xs text-muted-foreground">{row.name}</p></div><div className="text-right text-xs"><p className="num">{row.quantity} × {num(row.avgPrice)}</p><p className={cn("num", row.gain === null ? "text-muted-foreground" : row.gain >= 0 ? "text-bull" : "text-bear")}>{signed(row.gain, 0)}</p></div><div className="flex items-center gap-1"><button type="button" onClick={() => openEdit(row)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-surface-2 hover:text-foreground" aria-label={`Edit ${stripSuffix(row.symbol)}`}><Pencil className="h-3.5 w-3.5" /></button><button type="button" onClick={() => remove(row.symbol)} className="cursor-pointer rounded-lg p-2 text-muted-foreground hover:bg-bear/10 hover:text-bear" aria-label={`Remove ${stripSuffix(row.symbol)}`}><Trash2 className="h-3.5 w-3.5" /></button></div></div>)}</div><div className="mt-4 flex justify-end"><button type="button" onClick={openAdd} className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-xs font-bold text-primary-foreground"><Plus className="h-3.5 w-3.5" />Add holding</button></div></div></div>}
     </section>
   );
 }
