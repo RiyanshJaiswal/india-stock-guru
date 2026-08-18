@@ -35,13 +35,6 @@ For trading questions, distinguish observation from inference and always mention
 Do not promise profits or certainty. This is research assistance, not personalized financial advice.
 Prefer a useful answer in 4-8 short bullets or a compact paragraph, followed by the Confidence line.`;
 
-// --- News brief (with a short in-memory cache) -----------------------------
-//
-// RSS/news lookups are relatively slow and the same symbol is often asked
-// about repeatedly within a short window (follow-up questions in the same
-// chat, multiple users looking at the same stock, etc). Caching for a few
-// minutes cuts latency and load on the news pipeline without meaningfully
-// hurting freshness — news moves in hours, not seconds.
 const NEWS_CACHE_TTL_MS = 5 * 60_000;
 const newsBriefCache = new Map<string, { value: string; expiresAt: number }>();
 
@@ -56,9 +49,6 @@ function getCachedNewsBrief(symbol: string): string | undefined {
 }
 
 function setCachedNewsBrief(symbol: string, value: string): void {
-  // Simple unbounded-growth guard: if the cache gets unexpectedly large
-  // (e.g. many distinct symbols over a long-running dev/prod process),
-  // drop the oldest half rather than growing forever.
   if (newsBriefCache.size > 200) {
     const keys = [...newsBriefCache.keys()].slice(0, 100);
     for (const key of keys) newsBriefCache.delete(key);
@@ -66,13 +56,6 @@ function setCachedNewsBrief(symbol: string, value: string): void {
   newsBriefCache.set(symbol, { value, expiresAt: Date.now() + NEWS_CACHE_TTL_MS });
 }
 
-/**
- * Pulls a short, source-attributed news brief for the symbol using the
- * existing news research pipeline (Google News RSS + exchange/IR adapters,
- * see research-context.server.ts). This runs on every chat turn so the AI
- * always has real, dated, linkable news to ground its answer in — it never
- * has to invent headlines.
- */
 async function fetchNewsBrief(symbol: string): Promise<string> {
   const cached = getCachedNewsBrief(symbol);
   if (cached !== undefined) return cached;
@@ -115,8 +98,6 @@ async function fetchNewsBrief(symbol: string): Promise<string> {
         const when = item.observedAt ? dateFormatter.format(new Date(item.observedAt)) : "date unknown";
         const headline = item.value.kind === "text" ? item.value.value : item.label;
         const link = item.url ? ` (${item.url})` : "";
-        // Kept as "Source, DD Mon YYYY" so the model can copy this exact
-        // "(Source, date)" pair into its citation per the system prompt.
         return `${index + 1}. ${headline} — ${item.sourceName}, ${when}${link}`;
       })
       .join("\n");
@@ -124,18 +105,15 @@ async function fetchNewsBrief(symbol: string): Promise<string> {
     setCachedNewsBrief(symbol, brief);
     return brief;
   } catch {
-    // News lookup is best-effort. If it fails, the AI still has quote and
-    // portfolio context from the screen and will say news is unavailable.
-    // Deliberately NOT cached — a transient failure shouldn't lock the
-    // symbol out of news for the full TTL; the next turn can retry.
     return "";
   }
 }
 
-// --- Chat completion call, with timeout + retry -----------------------------
-
+// Gemini can transiently return 503/429 under capacity or rate pressure.
+// Keep retries short so Railway requests do not sit behind a 60s+ chain.
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
-const REQUEST_TIMEOUT_MS = 20_000;
+const REQUEST_TIMEOUT_MS = 8_000;
+const MAX_ATTEMPTS = 3;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -151,23 +129,32 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   }
 }
 
-/**
- * Gemini (and other providers) return 503 "model overloaded" fairly often
- * under free-tier/high-demand conditions — this is a transient, server-side
- * capacity issue, not a bad request. Retry a couple of times with backoff
- * before giving up and falling back to the local reply. Each attempt also
- * has its own timeout so a hung connection can't stall the whole request
- * (and can't eat the retry budget waiting forever on one attempt).
- */
+function retryDelay(response: Response | null, attempt: number): number {
+  const retryAfter = response?.headers.get("retry-after");
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0 && seconds <= 5) {
+      return Math.round(seconds * 1000);
+    }
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) {
+      const wait = Math.max(0, Math.min(5000, date - Date.now()));
+      return wait;
+    }
+  }
+  // Exponential backoff with small jitter: ~400-700ms, then ~800-1200ms.
+  const base = 400 * 2 ** attempt;
+  return base + Math.floor(Math.random() * 300);
+}
+
 async function callChatCompletions(
   baseUrl: string,
   apiKey: string,
   payload: Record<string, unknown>,
 ): Promise<Response | null> {
-  const attempts = 3;
   let lastResponse: Response | null = null;
 
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
     try {
       const response = await fetchWithTimeout(
         `${baseUrl}/chat/completions`,
@@ -185,21 +172,22 @@ async function callChatCompletions(
       if (response.ok) return response;
       lastResponse = response;
 
-      if (!RETRYABLE_STATUS.has(response.status) || attempt === attempts - 1) {
+      if (!RETRYABLE_STATUS.has(response.status) || attempt === MAX_ATTEMPTS - 1) {
         return response;
       }
+
+      await sleep(retryDelay(response, attempt));
     } catch (error) {
-      // Includes network errors and our own timeout abort.
-      if (attempt === attempts - 1) {
+      if (attempt === MAX_ATTEMPTS - 1) {
         if (error instanceof Error && error.name === "AbortError") {
-          console.error("AI provider request timed out");
+          console.error("AI provider request timed out after 8s");
+        } else {
+          console.error("AI provider network request failed");
         }
         return null;
       }
+      await sleep(retryDelay(null, attempt));
     }
-
-    // Backoff: ~500ms, ~1200ms before the next attempt.
-    await sleep(500 + attempt * 700);
   }
 
   return lastResponse;
@@ -221,10 +209,6 @@ export const askAi = createServerFn({ method: "POST" })
     const newsContext = newsBrief
       ? `Recent verified news for ${data.symbol} (last 14 days, via Google News / exchange feeds):\n${newsBrief}`
       : `Recent verified news for ${data.symbol}: none found in the last 14 days.`;
-
-    // Some OpenAI-compatible providers (Gemini's compat layer included) do
-    // not reliably honor multiple separate `system` role messages. Combine
-    // everything into one system message to avoid that class of bug.
     const combinedSystemMessage = `${SYSTEM_PROMPT}\n\n${screenContext}\n\n${newsContext}`;
 
     try {
@@ -239,9 +223,7 @@ export const askAi = createServerFn({ method: "POST" })
       });
 
       if (!response || !response.ok) {
-        if (response) {
-          console.error(`AI provider request failed (${response.status})`);
-        }
+        if (response) console.error(`AI provider request failed (${response.status})`);
         return { mode: "local" as const, content: "" };
       }
 
@@ -256,8 +238,6 @@ export const askAi = createServerFn({ method: "POST" })
       const rawContent = body.choices?.[0]?.message?.content?.trim();
       if (!rawContent) return { mode: "local" as const, content: "" };
 
-      // Defensive cap: an unexpectedly huge reply (bad provider response, a
-      // degenerate generation, etc.) shouldn't get rendered as-is.
       const content =
         rawContent.length > MAX_REPLY_LENGTH
           ? `${rawContent.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)`
