@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, ExternalLink, RefreshCw, Search } from "lucide-react";
+import { ArrowLeft, ExternalLink, Minus, RefreshCw, Search, TrendingDown, TrendingUp } from "lucide-react";
 
 import { marketNewsArchiveQuery } from "@/lib/market-queries";
 import { cn } from "@/lib/utils";
@@ -38,6 +38,31 @@ function relative(value: string): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   return `${Math.floor(hours / 24)}d ago`;
+}
+
+function impactFor(sentiment: "positive" | "negative" | "neutral") {
+  if (sentiment === "positive") {
+    return {
+      label: "Bullish bias",
+      detail: "News is positive for the highlighted stock",
+      className: "border-bull/25 bg-bull/10 text-bull",
+      icon: TrendingUp,
+    };
+  }
+  if (sentiment === "negative") {
+    return {
+      label: "Bearish bias",
+      detail: "News is negative for the highlighted stock",
+      className: "border-bear/25 bg-bear/10 text-bear",
+      icon: TrendingDown,
+    };
+  }
+  return {
+    label: "Neutral / watch",
+    detail: "News direction is not strong enough to call",
+    className: "border-border bg-surface-2/70 text-muted-foreground",
+    icon: Minus,
+  };
 }
 
 export const Route = createFileRoute("/news")({
@@ -122,19 +147,44 @@ function NewsPage() {
             <div className="px-4 py-10 text-center sm:px-5"><p className="text-sm font-semibold">No matching news found.</p><p className="mt-1 text-xs text-muted-foreground">Try the company name, NSE symbol, or another date.</p></div>
           ) : (
             <ul className="divide-y divide-border">
-              {news.map((item) => (
-                <li key={item.id} className="px-4 py-4 transition-colors hover:bg-surface-2/30 sm:px-5">
-                  <div className="flex items-start justify-between gap-3">
-                    <a href={item.url} target="_blank" rel="noreferrer" className="min-w-0 text-sm font-semibold leading-snug hover:text-primary hover:underline sm:text-[15px]">{item.headline}</a>
-                    <span className={cn("shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase", toneClass[item.sentiment])}>{item.sentiment}</span>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
-                    <span>{item.source}</span><span aria-hidden>·</span><time title={formatDate(item.publishedAt)}>{formatDate(item.publishedAt)} · {relative(item.publishedAt)}</time>
-                    {item.tickers.map((ticker) => <span key={ticker} className="num rounded bg-surface-2 px-1.5 py-0.5 text-[10px]">{ticker}</span>)}
-                    <a href={item.url} target="_blank" rel="noreferrer" aria-label="Open article" className="ml-auto inline-flex items-center gap-1 font-semibold text-primary hover:underline">Open <ExternalLink className="h-3 w-3" /></a>
-                  </div>
-                </li>
-              ))}
+              {news.map((item) => {
+                const impact = impactFor(item.sentiment);
+                const ImpactIcon = impact.icon;
+                return (
+                  <li key={item.id} className="px-4 py-4 transition-colors hover:bg-surface-2/30 sm:px-5">
+                    <div className="flex items-start justify-between gap-3">
+                      <a href={item.url} target="_blank" rel="noreferrer" className="min-w-0 text-sm font-semibold leading-snug hover:text-primary hover:underline sm:text-[15px]">{item.headline}</a>
+                      <span className={cn("shrink-0 rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase", toneClass[item.sentiment])}>{item.sentiment}</span>
+                    </div>
+
+                    {item.tickers.length > 0 && (
+                      <div className={cn("mt-3 rounded-xl border p-3", impact.className)}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <ImpactIcon className="h-4 w-4" />
+                            <span className="text-xs font-bold uppercase tracking-wider">Potential stock impact</span>
+                          </div>
+                          <span className="text-xs font-black">{impact.label}</span>
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {item.tickers.map((ticker) => (
+                            <Link key={ticker} to="/stock/$symbol" params={{ symbol: ticker }} className="rounded-lg bg-background/50 px-2.5 py-1.5 text-xs font-black hover:underline">
+                              {ticker}
+                            </Link>
+                          ))}
+                        </div>
+                        <p className="mt-2 text-[11px] opacity-80">{impact.detail}. This is a news-based directional signal, not a guaranteed price prediction.</p>
+                      </div>
+                    )}
+
+                    <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+                      <span>{item.source}</span><span aria-hidden>·</span><time title={formatDate(item.publishedAt)}>{formatDate(item.publishedAt)} · {relative(item.publishedAt)}</time>
+                      {item.tickers.map((ticker) => <span key={ticker} className="num rounded bg-surface-2 px-1.5 py-0.5 text-[10px]">{ticker}</span>)}
+                      <a href={item.url} target="_blank" rel="noreferrer" aria-label="Open article" className="ml-auto inline-flex items-center gap-1 font-semibold text-primary hover:underline">Open <ExternalLink className="h-3 w-3" /></a>
+                    </div>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </section>
