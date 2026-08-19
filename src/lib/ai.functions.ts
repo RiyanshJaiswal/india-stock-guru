@@ -32,6 +32,7 @@ const MAX_REPLY_LENGTH = 3_500;
 const NEWS_TIMEOUT_MS = 4_000;
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 const REQUEST_TIMEOUT_MS = 25_000;
+const VERIFIED_FALLBACK_MODEL = "gemini-flash-latest";
 
 function clampText(value: string, maxChars: number): string { return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n… (truncated)`; }
 function sanitizeContext(context: Record<string, unknown>): string { try { return clampText(JSON.stringify(context), MAX_CONTEXT_CHARS); } catch { return "{}"; } }
@@ -92,8 +93,6 @@ function extractAiContent(body: unknown): string | null {
 }
 
 async function callGeminiCompatible(apiKey: string, model: string, prompt: string): Promise<string | null> {
-  // Google officially exposes an OpenAI-compatible endpoint. Using this endpoint avoids
-  // base-URL/model-path mismatches while preserving the existing chat-completions adapter.
   const url = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
   const payload = {
     model,
@@ -111,10 +110,7 @@ async function callGeminiCompatible(apiKey: string, model: string, prompt: strin
         body: JSON.stringify(payload),
       }, REQUEST_TIMEOUT_MS);
       lastStatus = response.status;
-      if (response.ok) {
-        const body = await response.json();
-        return extractAiContent(body);
-      }
+      if (response.ok) return extractAiContent(await response.json());
       if (!RETRYABLE_STATUS.has(response.status) || attempt === 2) break;
       await sleep(retryDelay(response, attempt));
     } catch (error) {
@@ -122,7 +118,7 @@ async function callGeminiCompatible(apiKey: string, model: string, prompt: strin
       else await sleep(600 * (attempt + 1));
     }
   }
-  console.error(`Gemini compatible request failed (${lastStatus || "network"})`);
+  console.error(`Gemini compatible request failed (${lastStatus || "network"}) for ${model}`);
   return null;
 }
 
@@ -143,17 +139,26 @@ async function callGeminiNative(apiKey: string, model: string, prompt: string): 
         const json = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
         return json.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim() || null;
       }
-      // A 404 here can mean the configured endpoint/model path is incompatible with
-      // the account's API surface. Fall through to Google's official compatibility API.
-      if (response.status === 404) return null;
+      if (response.status === 404) {
+        console.error(`Gemini native model unavailable (${response.status}) for ${model}`);
+        return null;
+      }
       if (!RETRYABLE_STATUS.has(response.status) || attempt === 1) return null;
       await sleep(retryDelay(response, attempt));
-    } catch {
-      if (attempt === 1) return null;
-      await sleep(500);
+    } catch (error) {
+      if (attempt === 1) console.error(error instanceof Error && error.name === "AbortError" ? "Gemini native request timed out" : "Gemini native request failed");
+      else await sleep(500);
     }
   }
   return null;
+}
+
+async function callGeminiWithFallback(apiKey: string, model: string, prompt: string): Promise<string | null> {
+  const primary = await callGeminiNative(apiKey, model, prompt) || await callGeminiCompatible(apiKey, model, prompt);
+  if (primary) return primary;
+  if (model === VERIFIED_FALLBACK_MODEL) return null;
+  console.warn(`Falling back from ${model} to ${VERIFIED_FALLBACK_MODEL}`);
+  return await callGeminiNative(apiKey, VERIFIED_FALLBACK_MODEL, prompt) || await callGeminiCompatible(apiKey, VERIFIED_FALLBACK_MODEL, prompt);
 }
 
 export const askAi = createServerFn({ method: "POST" })
@@ -169,11 +174,7 @@ export const askAi = createServerFn({ method: "POST" })
     const newsContext = newsBrief ? `\n\nLatest verified news (recent):\n${newsBrief}` : "\n\nLatest verified news: temporarily unavailable. Do not guess.";
     const prompt = `${SYSTEM_PROMPT}\n\n${screenContext}${newsContext}\n\nConversation so far:\n${history.map((m) => `${m.role}: ${m.content}`).join("\n")}\n\nUser question: ${data.userMessage}`;
 
-    // Prefer Google's native API, then automatically fall back to Google's official
-    // OpenAI-compatible endpoint. This is deliberately self-contained so an endpoint
-    // configuration mistake cannot turn into an empty AI answer.
-    const nativeContent = await callGeminiNative(apiKey, configuredModel, prompt);
-    const content = nativeContent || await callGeminiCompatible(apiKey, configuredModel, prompt);
+    const content = await callGeminiWithFallback(apiKey, configuredModel, prompt);
     if (content) {
       const bounded = content.length > MAX_REPLY_LENGTH ? `${content.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)` : content;
       return { mode: "ai" as const, content: bounded };
