@@ -12,7 +12,6 @@ import { NewsFeed } from "@/components/market/NewsFeed";
 import { ChartPanel } from "@/components/market/ChartPanel";
 import { defaultWatchlist } from "@/data/market";
 import { quoteQuery } from "@/lib/market-queries";
-import { stripSuffix } from "@/lib/market-types";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -86,20 +85,13 @@ function Dashboard() {
             <ChartPanel quote={activeQuote} symbol={activeSymbol} isLoading={isLoading} />
             <Portfolio />
           </div>
-          <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4">
+          <div className="min-h-0">
             <Watchlist
               symbols={watchlist}
               activeSymbol={activeSymbol}
               onSelect={setActiveSymbol}
               onRemove={toggleWatch}
             />
-            <div className="flex items-center justify-between gap-3 rounded-2xl border border-primary/20 bg-primary/5 p-3">
-              <div className="flex min-w-0 items-center gap-3">
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary/15 text-primary"><BrainCircuit className="h-4 w-4" /></span>
-                <div className="min-w-0"><p className="truncate text-sm font-bold">AI Researcher</p><p className="truncate text-xs text-muted-foreground">Deep stock & news research</p></div>
-              </div>
-              <Link to="/ai-researcher" className="shrink-0 rounded-lg bg-primary px-3 py-2 text-xs font-bold text-primary-foreground hover:opacity-90">Open</Link>
-            </div>
           </div>
         </div>
 
