@@ -1,6 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
+import { classifyText, EVENT_WEIGHTS } from "./news-classify";
+import type { EventType } from "./news-types";
+
 const MARKET_AUX_URL = "https://api.marketaux.com/v1/news/all";
 const NEWS_API_URL = "https://newsapi.org/v2/everything";
 const GNEWS_URL = "https://gnews.io/api/v4/search";
@@ -25,8 +28,14 @@ const newsInput = z.object({
   search: z.string().trim().max(100).optional().default(""),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
 });
+
 const NEWS_CACHE_TTL_MS = 30_000;
 const NEWS_TIMEOUT_MS = 4_000;
+
+type Sentiment = "positive" | "negative" | "neutral";
+type ImpactDirection = "bullish" | "bearish" | "neutral";
+type ImpactLevel = "high" | "medium" | "low";
+type TimeHorizon = "intraday" | "1-5 days" | "1-4 weeks" | "longer-term";
 
 export type MarketNewsItem = {
   id: string;
@@ -35,7 +44,15 @@ export type MarketNewsItem = {
   publishedAt: string;
   url: string;
   tickers: string[];
-  sentiment: "positive" | "negative" | "neutral";
+  sentiment: Sentiment;
+  primaryEventType: EventType;
+  eventTypes: EventType[];
+  impactDirection: ImpactDirection;
+  impactLevel: ImpactLevel;
+  impactScore: number;
+  timeHorizon: TimeHorizon;
+  confidence: number;
+  impactReason: string;
 };
 
 type MarketauxEntity = { symbol?: unknown; sentiment_score?: unknown };
@@ -49,7 +66,7 @@ type GNewsResponse = { articles?: unknown };
 const newsCache = new Map<string, { value: MarketNewsItem[]; expiresAt: number }>();
 const inFlightNews = new Map<string, Promise<MarketNewsItem[]>>();
 
-function sentimentFor(entities: unknown): MarketNewsItem["sentiment"] {
+function sentimentForEntities(entities: unknown): Sentiment {
   if (!Array.isArray(entities)) return "neutral";
   const scores = entities.map((entity) => Number((entity as MarketauxEntity).sentiment_score)).filter(Number.isFinite);
   if (!scores.length) return "neutral";
@@ -59,29 +76,50 @@ function sentimentFor(entities: unknown): MarketNewsItem["sentiment"] {
   return "neutral";
 }
 
+function sentimentForHeadline(headline: string): Sentiment {
+  const positive = /\b(beat|beats|surge|surges|jump|jumps|rise|rises|raised|raises|upgrade|upgraded|strong|growth|profit|order win|wins|bagged|acquire|acquisition|buyback|dividend|approval|approved|expansion|record high|outperform)\b/i.test(headline);
+  const negative = /\b(miss|misses|fall|falls|drop|drops|cut|cuts|downgrade|downgraded|weak|loss|losses|probe|investigation|penalty|penalised|resign|resignation|default|fraud|delay|decline|declined|warning|suspend|suspended|pledge)\b/i.test(headline);
+  if (positive && !negative) return "positive";
+  if (negative && !positive) return "negative";
+  return "neutral";
+}
+
 function tickersFor(entities: unknown): string[] {
   if (!Array.isArray(entities)) return [];
   return [...new Set(entities.map((entity) => String((entity as MarketauxEntity).symbol ?? "").trim()).filter(Boolean).map((symbol) => symbol.replace(/\.NS$|\.BO$/i, "")))].slice(0, 5);
+}
+
+// Exact-word aliases provide ticker coverage for RSS/NewsAPI/GNews items that
+// do not expose structured company entities. Keep this conservative to avoid
+// attaching a news story to the wrong company.
+const COMPANY_ALIASES: Array<[string, string]> = [
+  ["reliance industries", "RELIANCE"], ["reliance", "RELIANCE"], ["tata consultancy services", "TCS"], ["tcs", "TCS"],
+  ["infosys", "INFY"], ["hdfc bank", "HDFCBANK"], ["icici bank", "ICICIBANK"], ["state bank of india", "SBIN"], ["sbi", "SBIN"],
+  ["bharti airtel", "BHARTIARTL"], ["airtel", "BHARTIARTL"], ["itc", "ITC"], ["larsen & toubro", "LT"], ["l&t", "LT"],
+  ["adani enterprises", "ADANIENT"], ["adani ports", "ADANIPORTS"], ["tata motors", "TATAMOTORS"], ["tata steel", "TATASTEEL"],
+  ["tata power", "TATAPOWER"], ["maruti suzuki", "MARUTI"], ["sun pharma", "SUNPHARMA"], ["asian paints", "ASIANPAINT"],
+  ["bajaj finance", "BAJFINANCE"], ["kotak mahindra bank", "KOTAKBANK"], ["axis bank", "AXISBANK"], ["wipro", "WIPRO"],
+  ["hcltech", "HCLTECH"], ["hcl technologies", "HCLTECH"], ["ongc", "ONGC"], ["ntpc", "NTPC"], ["power grid", "POWERGRID"],
+  ["hindalco", "HINDALCO"], ["jsw steel", "JSWSTEEL"], ["nestle india", "NESTLEIND"], ["eternal", "ETERNAL"],
+];
+
+function inferTickersFromHeadline(headline: string): string[] {
+  const normalized = headline.toLowerCase().replace(/[^a-z0-9&]+/g, " ").trim();
+  return COMPANY_ALIASES.filter(([alias]) => {
+    const value = alias.toLowerCase();
+    return normalized === value || normalized.includes(` ${value} `) || normalized.startsWith(`${value} `) || normalized.endsWith(` ${value}`);
+  }).map(([, ticker]) => ticker).filter((ticker, index, all) => all.indexOf(ticker) === index).slice(0, 3);
 }
 
 function normalizeTitle(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
-/**
- * Search on the news page is company/share search, not general web search.
- * Providers such as Google News, GNews and NewsAPI can return fuzzy matches
- * (for example "reliant" for "Reliance") or articles that only mention the
- * company in their body. Require the searched phrase to occur as a complete
- * word/phrase in the HEADLINE so unrelated articles cannot leak into results.
- */
 function headlineMatchesSearch(headline: string, search: string): boolean {
   const query = normalizeTitle(search);
   if (!query) return true;
-
   const title = normalizeTitle(headline);
   if (!title) return false;
-
   const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`(?:^| )${escaped}(?:$| )`, "i").test(title);
 }
@@ -105,25 +143,13 @@ function parseFeed(xml: string, source: string): MarketNewsItem[] {
     const headline = tagValue(block, "title");
     const publishedAt = tagValue(block, "pubDate") || tagValue(block, "published") || tagValue(block, "updated");
     let url = tagValue(block, "link");
-    if (!url) {
-      const href = block.match(/<link[^>]+href=["']([^"']+)["']/i);
-      url = href?.[1] ?? "";
-    }
-    return {
-      id: `rss-${source}-${index}-${publishedAt}-${headline}`,
-      headline,
-      source,
-      publishedAt,
-      url,
-      tickers: [],
-      sentiment: "neutral" as const,
-    };
+    if (!url) url = block.match(/<link[^>]+href=["']([^"']+)["']/i)?.[1] ?? "";
+    return { id: `rss-${source}-${index}-${publishedAt}-${headline}`, headline, source, publishedAt, url, tickers: [], sentiment: "neutral", primaryEventType: "general", eventTypes: ["general"], impactDirection: "neutral", impactLevel: "low", impactScore: 0, timeHorizon: "1-5 days", confidence: 0, impactReason: "Insufficient structured evidence." };
   }).filter(isValidArticle);
 }
 
 function dayBoundsUtc(date?: string): { after?: string; before?: string } {
   if (!date) return {};
-  // User-facing news days are India (IST) calendar days; API timestamps are UTC.
   const start = new Date(`${date}T00:00:00+05:30`);
   const end = new Date(`${date}T23:59:59.999+05:30`);
   return { after: start.toISOString(), before: end.toISOString() };
@@ -133,17 +159,11 @@ async function fetchText(url: string): Promise<string | null> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), NEWS_TIMEOUT_MS);
   try {
-    const response = await fetch(url, {
-      headers: { accept: "application/rss+xml, application/xml, text/xml, application/json", "user-agent": "India-Stock-Guru/1.0" },
-      signal: controller.signal,
-    });
+    const response = await fetch(url, { headers: { accept: "application/rss+xml, application/xml, text/xml, application/json", "user-agent": "India-Stock-Guru/1.0" }, signal: controller.signal });
     if (!response.ok) return null;
     return await response.text();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
+  } catch { return null; }
+  finally { clearTimeout(timeout); }
 }
 
 async function fetchJson(url: string): Promise<unknown | null> {
@@ -153,11 +173,8 @@ async function fetchJson(url: string): Promise<unknown | null> {
     const response = await fetch(url, { headers: { accept: "application/json" }, signal: controller.signal });
     if (!response.ok) return null;
     return await response.json();
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
+  } catch { return null; }
+  finally { clearTimeout(timeout); }
 }
 
 function searchTerms(search: string): string {
@@ -173,7 +190,6 @@ async function fetchMarketauxNews(limit: number, search: string, date?: string):
   if (bounds.after) params.set("published_after", bounds.after);
   if (bounds.before) params.set("published_before", bounds.before);
   if (!date) params.set("published_after", new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString());
-
   const body = (await fetchJson(`${MARKET_AUX_URL}?${params}`)) as MarketauxResponse | null;
   if (!body || !Array.isArray(body.data)) return [];
   return body.data.map((raw): MarketNewsItem | null => {
@@ -182,7 +198,8 @@ async function fetchMarketauxNews(limit: number, search: string, date?: string):
     const publishedAt = typeof article.published_at === "string" ? article.published_at : "";
     const url = typeof article.url === "string" ? article.url : "";
     if (!headline || !publishedAt || !url) return null;
-    return { id: typeof article.uuid === "string" ? article.uuid : `${publishedAt}-${headline}`, headline, source: typeof article.source === "string" ? article.source : "Marketaux", publishedAt, url, tickers: tickersFor(article.entities), sentiment: sentimentFor(article.entities) };
+    const tickers = tickersFor(article.entities);
+    return { id: typeof article.uuid === "string" ? article.uuid : `${publishedAt}-${headline}`, headline, source: typeof article.source === "string" ? article.source : "Marketaux", publishedAt, url, tickers, sentiment: sentimentForEntities(article.entities), primaryEventType: "general", eventTypes: ["general"], impactDirection: "neutral", impactLevel: "low", impactScore: 0, timeHorizon: "1-5 days", confidence: 0, impactReason: "" };
   }).filter((item): item is MarketNewsItem => item !== null);
 }
 
@@ -203,7 +220,7 @@ async function fetchNewsApiNews(limit: number, search: string, date?: string): P
     const url = typeof article.url === "string" ? article.url : "";
     const source = typeof article.source?.name === "string" ? article.source.name : "NewsAPI";
     if (!headline || !publishedAt || !url) return null;
-    return { id: `newsapi-${url}`, headline, source, publishedAt, url, tickers: [], sentiment: "neutral" };
+    return { id: `newsapi-${url}`, headline, source, publishedAt, url, tickers: inferTickersFromHeadline(headline), sentiment: sentimentForHeadline(headline), primaryEventType: "general", eventTypes: ["general"], impactDirection: "neutral", impactLevel: "low", impactScore: 0, timeHorizon: "1-5 days", confidence: 0, impactReason: "" };
   }).filter((item): item is MarketNewsItem => item !== null);
 }
 
@@ -224,7 +241,7 @@ async function fetchGNews(limit: number, search: string, date?: string): Promise
     const url = typeof article.url === "string" ? article.url : "";
     const source = typeof article.source?.name === "string" ? article.source.name : "GNews";
     if (!headline || !publishedAt || !url) return null;
-    return { id: `gnews-${url}`, headline, source, publishedAt, url, tickers: [], sentiment: "neutral" };
+    return { id: `gnews-${url}`, headline, source, publishedAt, url, tickers: inferTickersFromHeadline(headline), sentiment: sentimentForHeadline(headline), primaryEventType: "general", eventTypes: ["general"], impactDirection: "neutral", impactLevel: "low", impactScore: 0, timeHorizon: "1-5 days", confidence: 0, impactReason: "" };
   }).filter((item): item is MarketNewsItem => item !== null);
 }
 
@@ -238,9 +255,45 @@ async function fetchAllRssNews(search: string, date?: string): Promise<MarketNew
   const before = bounds.before ? new Date(bounds.before).getTime() : Date.now();
   return feeds.flat().filter((item) => {
     const time = new Date(item.publishedAt).getTime();
-    const inRange = Number.isFinite(time) && time >= after && time <= before;
-    return inRange && headlineMatchesSearch(item.headline, search);
+    return Number.isFinite(time) && time >= after && time <= before && headlineMatchesSearch(item.headline, search);
   });
+}
+
+function eventLabel(type: EventType): string {
+  return type === "general" ? "Market / company news" : type.replace(/-/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function eventDirection(type: EventType, sentiment: Sentiment): ImpactDirection {
+  if (["dividend", "bonus-issue", "buyback", "order-win", "acquisition"].includes(type)) return "bullish";
+  if (["regulatory", "exchange-notice", "credit-rating", "promoter-activity", "management-change"].includes(type)) return sentiment === "positive" ? "bullish" : sentiment === "negative" ? "bearish" : "neutral";
+  if (["merger", "guidance", "earnings"].includes(type)) return sentiment === "positive" ? "bullish" : sentiment === "negative" ? "bearish" : "neutral";
+  if (["rights-issue"].includes(type)) return sentiment === "positive" ? "neutral" : "bearish";
+  if (["stock-split", "board-meeting", "agm-egm", "fii-dii-flow"].includes(type)) return sentiment;
+  return sentiment === "positive" ? "bullish" : sentiment === "negative" ? "bearish" : "neutral";
+}
+
+function horizonFor(type: EventType): TimeHorizon {
+  if (["exchange-notice", "regulatory", "earnings", "guidance", "promoter-activity", "credit-rating"].includes(type)) return "intraday";
+  if (["order-win", "acquisition", "merger", "management-change", "fii-dii-flow"].includes(type)) return "1-5 days";
+  if (["dividend", "bonus-issue", "stock-split", "rights-issue", "buyback"].includes(type)) return "1-4 weeks";
+  return "1-4 weeks";
+}
+
+function enrichImpact(item: MarketNewsItem): MarketNewsItem {
+  const classification = classifyText(item.headline);
+  const primaryEventType = classification.primaryEventType;
+  const eventWeight = EVENT_WEIGHTS[primaryEventType] ?? 0.3;
+  const sentiment = item.sentiment === "neutral" ? sentimentForHeadline(item.headline) : item.sentiment;
+  const direction = eventDirection(primaryEventType, sentiment);
+  const sourceBoost = /reuters|nse|bse|exchange/i.test(item.source) ? 10 : /moneycontrol|economic times|business standard|livemint|cnbc|ndtv|financial express/i.test(item.source) ? 6 : 2;
+  const sentimentBoost = sentiment === "neutral" ? 0 : 8;
+  const tickerBoost = item.tickers.length > 0 ? 10 : 0;
+  const impactScore = Math.round(Math.min(100, 25 + eventWeight * 45 + sourceBoost + sentimentBoost + tickerBoost));
+  const impactLevel: ImpactLevel = impactScore >= 75 ? "high" : impactScore >= 55 ? "medium" : "low";
+  const confidence = Math.round(Math.min(95, 42 + (primaryEventType !== "general" ? 22 : 0) + tickerBoost + (sentiment !== "neutral" ? 14 : 0) + sourceBoost / 2));
+  const directionText = direction === "bullish" ? "positive upside bias" : direction === "bearish" ? "downside bias" : "mixed/unclear direction";
+  const reason = `${eventLabel(primaryEventType)} detected; headline sentiment is ${sentiment}. The rule engine estimates ${directionText}.`;
+  return { ...item, sentiment, primaryEventType, eventTypes: classification.eventTypes, impactDirection: direction, impactLevel, impactScore, timeHorizon: horizonFor(primaryEventType), confidence, impactReason: reason };
 }
 
 async function fetchCombinedIndianStockNews(limit: number, search: string, date?: string): Promise<MarketNewsItem[]> {
@@ -251,11 +304,10 @@ async function fetchCombinedIndianStockNews(limit: number, search: string, date?
     fetchAllRssNews(search, date),
   ]);
 
-  // Apply the same strict headline rule to every provider. API-side quoted
-  // search is only a relevance hint; it is not a correctness guarantee.
   const merged = [...marketaux, ...newsApi, ...gnews, ...rss]
     .filter(isValidArticle)
     .filter((item) => headlineMatchesSearch(item.headline, search))
+    .map(enrichImpact)
     .sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
 
   const seen = new Set<string>();
