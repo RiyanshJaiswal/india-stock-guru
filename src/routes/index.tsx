@@ -1,14 +1,13 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, RefreshCw } from "lucide-react";
+import { Activity, BrainCircuit, RefreshCw } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { MarketOverview } from "@/components/market/MarketOverview";
 import { StockSearch } from "@/components/market/StockSearch";
 import { Watchlist } from "@/components/market/Watchlist";
 import { Portfolio } from "@/components/market/Portfolio";
-import { AiAssistant } from "@/components/market/AiAssistant";
 import { NewsFeed } from "@/components/market/NewsFeed";
 import { ChartPanel } from "@/components/market/ChartPanel";
 import { defaultWatchlist } from "@/data/market";
@@ -22,13 +21,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Search every NSE and BSE listed stock, track your watchlist, portfolio P&L, market news and an AI market copilot in one dark dashboard.",
+          "Search every NSE and BSE listed stock, track your watchlist, portfolio P&L, market news and AI research in one dark dashboard.",
       },
       { property: "og:title", content: "Dalal Desk — AI Indian Stock Market Dashboard" },
       {
         property: "og:description",
         content:
-          "Live NSE/BSE stock search, watchlist, portfolio P&L, market news and an AI copilot in one dark dashboard.",
+          "Live NSE/BSE stock search, watchlist, portfolio P&L, market news and AI research in one dark dashboard.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -41,7 +40,6 @@ function Dashboard() {
   const queryClient = useQueryClient();
   const [watchlist, setWatchlist] = useState<string[]>(defaultWatchlist);
   const [activeSymbol, setActiveSymbol] = useState(defaultWatchlist[0]!);
-
   const { data: activeQuote, isLoading } = useQuery(quoteQuery(activeSymbol));
 
   const toggleWatch = (symbol: string) =>
@@ -59,9 +57,7 @@ function Dashboard() {
             </span>
             <div className="min-w-0">
               <h1 className="truncate text-lg font-black sm:text-xl">Dalal Desk</h1>
-              <p className="truncate text-xs text-muted-foreground">
-                NSE · BSE — AI market terminal
-              </p>
+              <p className="truncate text-xs text-muted-foreground">NSE · BSE — AI market terminal</p>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
@@ -83,7 +79,6 @@ function Dashboard() {
 
       <main className="mx-auto max-w-7xl space-y-4 px-4 py-5 sm:px-6 sm:py-6">
         <StockSearch watchlist={watchlist} onToggle={toggleWatch} />
-
         <MarketOverview />
 
         <div className="grid items-stretch gap-4 lg:grid-cols-3">
@@ -98,17 +93,29 @@ function Dashboard() {
               onSelect={setActiveSymbol}
               onRemove={toggleWatch}
             />
-            <AiAssistant activeSymbol={stripSuffix(activeSymbol)} activeQuote={activeQuote} />
+            <div className="flex items-center justify-between gap-3 rounded-2xl border border-primary/20 bg-primary/5 p-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-primary/15 text-primary"><BrainCircuit className="h-4 w-4" /></span>
+                <div className="min-w-0"><p className="truncate text-sm font-bold">AI Researcher</p><p className="truncate text-xs text-muted-foreground">Deep stock & news research</p></div>
+              </div>
+              <Link to="/ai-researcher" className="shrink-0 rounded-lg bg-primary px-3 py-2 text-xs font-bold text-primary-foreground hover:opacity-90">Open</Link>
+            </div>
           </div>
         </div>
 
         <NewsFeed />
-
-        <p className="pb-6 text-center text-xs text-muted-foreground">
-          Quotes are delayed and provided for personal research. Swap the market service for your
-          FastAPI backend to change the data source.
-        </p>
+        <p className="pb-6 text-center text-xs text-muted-foreground">Quotes are delayed and provided for personal research.</p>
       </main>
+
+      <Link
+        to="/ai-researcher"
+        aria-label="Open AI Researcher"
+        title="AI Researcher"
+        className="fixed bottom-5 right-5 z-[70] grid h-12 w-12 place-items-center rounded-full border border-primary/30 bg-background/95 text-primary shadow-xl shadow-primary/10 backdrop-blur transition-transform hover:scale-105"
+      >
+        <BrainCircuit className="h-5 w-5" />
+        <span className="sr-only">AI Researcher</span>
+      </Link>
     </div>
   );
 }
