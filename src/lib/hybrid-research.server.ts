@@ -2,7 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { getMarketNews, type MarketNewsItem } from "./market-news.functions";
 import { runResearchContext } from "./research-context.server";
-import type { ResearchEvidence } from "./research-types";
+import type { ResearchContext, ResearchEvidence } from "./research-types";
 
 const inputSchema = z.object({ symbol: z.string().trim().min(1).max(32) });
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -21,10 +21,36 @@ type HybridAiReport = {
   confidence: number;
 };
 
+type ClientContext = {
+  symbol: string;
+  ticker: string;
+  exchange: ResearchContext["exchange"];
+  companyName: string | null;
+  currency: string | null;
+  builtAt: string;
+  quality: ResearchContext["quality"] | null;
+  coverage: ResearchContext["coverage"];
+  conflicts: ResearchContext["conflicts"];
+  gaps: ResearchContext["gaps"];
+  evidence: Array<{
+    key: string;
+    domain: string;
+    label: string;
+    value: unknown;
+    unit: string;
+    direction: string;
+    importance: number;
+    reliability: number;
+    source: string;
+    observedAt: string | null;
+    note: string | null;
+  }>;
+};
+
 export type HybridResearchResult = {
   ok: boolean;
   symbol: string;
-  context: ReturnType<typeof buildClientContext>;
+  context: ClientContext;
   marketNews: Pick<MarketNewsItem, "headline" | "source" | "publishedAt" | "tickers" | "sentiment" | "primaryEventType" | "impactDirection" | "impactLevel" | "impactScore" | "timeHorizon" | "confidence" | "impactReason" | "url">>[];
   ai: HybridAiReport | null;
   error?: string;
@@ -36,10 +62,8 @@ function valueOf(evidence: ResearchEvidence): unknown {
     : null;
 }
 
-function buildClientContext(context: Awaited<ReturnType<typeof runResearchContext>> extends infer R
-  ? R extends { ok: true; data: infer D } ? D : never
-  : never) {
-  const evidence = context.evidence
+function buildClientContext(context: ResearchContext): ClientContext {
+  const evidence = [...context.evidence]
     .sort((a, b) => b.importance - a.importance)
     .slice(0, MAX_EVIDENCE)
     .map((item) => ({
@@ -71,7 +95,7 @@ function buildClientContext(context: Awaited<ReturnType<typeof runResearchContex
   };
 }
 
-function fallbackReport(evidence: ReturnType<typeof buildClientContext>["evidence"]): HybridAiReport {
+function fallbackReport(evidence: ClientContext["evidence"]): HybridAiReport {
   const find = (key: string) => evidence.find((item) => item.key === key)?.value;
   const trend = String(find("technical.trend") ?? "sideways");
   const rsi = find("technical.rsi");
@@ -116,7 +140,7 @@ function extractJson(text: string): HybridAiReport | null {
   }
 }
 
-async function callHybridAi(symbol: string, context: ReturnType<typeof buildClientContext>, marketNews: HybridResearchResult["marketNews"]): Promise<HybridAiReport | null> {
+async function callHybridAi(symbol: string, context: ClientContext, marketNews: HybridResearchResult["marketNews"]): Promise<HybridAiReport | null> {
   const apiKey = process.env.AI_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
   const baseUrl = (process.env.AI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
   const model = process.env.AI_MODEL?.trim() || process.env.OPENAI_MODEL?.trim();
@@ -168,23 +192,43 @@ ${JSON.stringify({ gaps: context.gaps, conflicts: context.conflicts })}`;
   }
 }
 
+function emptyContext(symbol: string): ClientContext {
+  return {
+    symbol,
+    ticker: symbol.replace(/\.(NS|BO)$/i, ""),
+    exchange: "NSE",
+    companyName: null,
+    currency: "INR",
+    builtAt: new Date().toISOString(),
+    quality: null,
+    coverage: [],
+    conflicts: [],
+    gaps: [],
+    evidence: [],
+  };
+}
+
 export const getHybridResearch = createServerFn({ method: "GET" })
   .inputValidator((data: unknown) => inputSchema.parse(data))
   .handler(async ({ data }): Promise<HybridResearchResult> => {
-    const symbol = data.symbol.toUpperCase().endsWith(".NS") || data.symbol.toUpperCase().endsWith(".BO") ? data.symbol.toUpperCase() : `${data.symbol.toUpperCase()}.NS`;
+    const raw = data.symbol.toUpperCase();
+    const symbol = raw.endsWith(".NS") || raw.endsWith(".BO") ? raw : `${raw}.NS`;
     try {
       const [researchResult, newsResult] = await Promise.all([
         runResearchContext({ symbol, domains: ["market", "technical", "fundamental", "news"], interval: "1d", range: "6mo", quarters: 4, years: 3, newsLimit: 8, newsSinceDays: 7 }),
         getMarketNews({ data: { limit: 50, search: "" } }),
       ]);
-      if (!researchResult.ok) return { ok: false, symbol, context: { symbol, ticker: symbol.replace(/\.(NS|BO)$/i, ""), exchange: "NSE", companyName: null, currency: "INR", builtAt: new Date().toISOString(), quality: null, coverage: researchResult.error.coverage, conflicts: [], gaps: [], evidence: [] }, marketNews: [], ai: null, error: researchResult.error.message };
+      if (!researchResult.ok) return { ok: false, symbol, context: emptyContext(symbol), marketNews: [], ai: null, error: researchResult.error.message };
 
       const context = buildClientContext(researchResult.data);
       const ticker = context.ticker.toUpperCase();
-      const marketNews = newsResult.filter((item) => item.tickers.some((value) => value.toUpperCase() === ticker)).slice(0, 8).map(({ headline, source, publishedAt, tickers, sentiment, primaryEventType, impactDirection, impactLevel, impactScore, timeHorizon, confidence, impactReason, url }) => ({ headline, source, publishedAt, tickers, sentiment, primaryEventType, impactDirection, impactLevel, impactScore, timeHorizon, confidence, impactReason, url }));
+      const marketNews = newsResult
+        .filter((item) => item.tickers.some((value) => value.toUpperCase() === ticker))
+        .slice(0, 8)
+        .map(({ headline, source, publishedAt, tickers, sentiment, primaryEventType, impactDirection, impactLevel, impactScore, timeHorizon, confidence, impactReason, url }) => ({ headline, source, publishedAt, tickers, sentiment, primaryEventType, impactDirection, impactLevel, impactScore, timeHorizon, confidence, impactReason, url }));
       const ai = (await callHybridAi(symbol, context, marketNews)) ?? fallbackReport(context.evidence);
       return { ok: true, symbol, context, marketNews, ai };
     } catch (error) {
-      return { ok: false, symbol, context: { symbol, ticker: symbol.replace(/\.(NS|BO)$/i, ""), exchange: "NSE", companyName: null, currency: "INR", builtAt: new Date().toISOString(), quality: null, coverage: [], conflicts: [], gaps: [], evidence: [] }, marketNews: [], ai: null, error: error instanceof Error ? error.message : "Hybrid research failed." };
+      return { ok: false, symbol, context: emptyContext(symbol), marketNews: [], ai: null, error: error instanceof Error ? error.message : "Hybrid research failed." };
     }
   });
