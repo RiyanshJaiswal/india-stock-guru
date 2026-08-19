@@ -45,7 +45,7 @@ export function AiAssistant({ activeSymbol, activeQuote, portfolioPositions = []
   const { data: portfolioQuotes } = useQuery(quotesQuery(portfolioPositions.map((p) => p.symbol)));
   const { data: newsImpact = [] } = useQuery({
     queryKey: ["ai-news-impact", activeSymbol],
-    queryFn: () => getAiNewsContext(activeSymbol),
+    queryFn: () => getAiNewsContext({ data: { symbol: activeSymbol } }),
     staleTime: 2 * 60_000,
     refetchOnWindowFocus: false,
   });
