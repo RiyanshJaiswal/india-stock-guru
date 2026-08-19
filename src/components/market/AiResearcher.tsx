@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { ArrowLeft, Bot, BrainCircuit, ChevronRight, Search, SendHorizonal, Sparkles } from "lucide-react";
@@ -11,18 +11,8 @@ import { num, signed, stripSuffix } from "@/lib/market-types";
 
 type Message = { id: string; role: "user" | "assistant"; content: string };
 type Impact = { symbol?: string; sentiment?: string; impactScore?: number; impactLevel?: string; horizon?: string; confidence?: number; eventType?: string; reason?: string; headline?: string };
-type Position = { symbol: string; quantity: number; avgPrice: number };
 
-const STORAGE_KEY = "dalal-desk.portfolio.v1";
 const DEFAULT_SYMBOL = "RELIANCE.NS";
-
-function readPositions(): Position[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "[]");
-    return Array.isArray(parsed) ? parsed.filter((p) => typeof p?.symbol === "string" && typeof p?.quantity === "number" && typeof p?.avgPrice === "number") : [];
-  } catch { return []; }
-}
 
 function impactTone(value: string | undefined) {
   const v = (value ?? "").toLowerCase();
@@ -37,7 +27,6 @@ export function AiResearcher() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
-  const positions = useMemo(readPositions, []);
 
   const { data: quote } = useQuery(quoteQuery(symbol));
   const { data: newsImpact = [], isLoading: newsLoading } = useQuery({
@@ -48,12 +37,6 @@ export function AiResearcher() {
   });
   const { data: searchResults = [] } = useQuery({ ...searchQuery(search), enabled: search.trim().length >= 2 });
 
-  const summary = useMemo(() => {
-    const rows = positions.map((p) => ({ ...p, invested: p.quantity * p.avgPrice, current: null as number | null }));
-    const invested = rows.reduce((s, r) => s + r.invested, 0);
-    return { invested, count: rows.length };
-  }, [positions]);
-
   const activeImpact = (newsImpact as Impact[])[0];
   const send = async (text: string) => {
     const prompt = text.trim();
@@ -62,7 +45,7 @@ export function AiResearcher() {
     setMessages((m) => [...m, { id: `${Date.now()}-u`, role: "user", content: prompt }]);
     setInput(""); setPending(true);
     try {
-      const result = await askAi({ data: { symbol, userMessage: prompt, messages: history, context: { quote, portfolio: summary, newsImpact, screen: "ai-researcher" } } });
+      const result = await askAi({ data: { symbol, userMessage: prompt, messages: history, context: { quote, newsImpact, screen: "ai-researcher" } } });
       setMessages((m) => [...m, { id: `${Date.now()}-a`, role: "assistant", content: result.content || "I couldn't produce a reliable answer from the available data." }]);
     } catch {
       setMessages((m) => [...m, { id: `${Date.now()}-a`, role: "assistant", content: "AI research is temporarily unavailable. Please try again in a moment." }]);
@@ -103,7 +86,7 @@ export function AiResearcher() {
 
         <div className="grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,.65fr)]">
           <section className="panel flex min-h-[560px] flex-col p-4 sm:p-5">
-            <header className="flex items-center gap-3 border-b border-border pb-4"><span className="grid h-9 w-9 place-items-center rounded-xl bg-primary/15 text-primary"><Bot className="h-5 w-5" /></span><div><h2 className="font-bold">Ask AI Researcher</h2><p className="text-xs text-muted-foreground">Answers are grounded in live quote, portfolio and news context.</p></div><Sparkles className="ml-auto h-4 w-4 text-primary" /></header>
+            <header className="flex items-center gap-3 border-b border-border pb-4"><span className="grid h-9 w-9 place-items-center rounded-xl bg-primary/15 text-primary"><Bot className="h-5 w-5" /></span><div><h2 className="font-bold">Ask AI Researcher</h2><p className="text-xs text-muted-foreground">Answers are grounded in live quote and verified news context.</p></div><Sparkles className="ml-auto h-4 w-4 text-primary" /></header>
             <div className="flex-1 space-y-3 overflow-y-auto py-4" aria-live="polite">
               {messages.length === 0 && <div className="rounded-2xl bg-surface-2/50 p-4"><p className="font-semibold">What would you like to know?</p><div className="mt-3 grid gap-2 sm:grid-cols-2">{[`Give me a full ${stripSuffix(symbol)} summary`, `What does the latest news mean for ${stripSuffix(symbol)}?`, `Is the current move supported by news?`, `What are the key risks for ${stripSuffix(symbol)}?`].map((q) => <button key={q} type="button" onClick={() => void send(q)} className="rounded-xl border border-border px-3 py-2.5 text-left text-sm hover:border-primary/50 hover:bg-surface-2">{q}</button>)}</div></div>}
               {messages.map((m) => <div key={m.id} className={m.role === "user" ? "ml-auto max-w-[88%] rounded-2xl rounded-br-md bg-primary px-4 py-3 text-sm text-primary-foreground" : "max-w-[92%] rounded-2xl bg-surface-2/60 px-4 py-3 text-sm leading-7"}>{m.content}</div>)}
@@ -114,7 +97,7 @@ export function AiResearcher() {
 
           <aside className="space-y-4">
             <section className="panel p-4"><div className="flex items-center justify-between"><h2 className="font-bold">Latest AI impact</h2><span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${tone === "bull" ? "bg-bull/12 text-bull" : tone === "bear" ? "bg-bear/12 text-bear" : "bg-surface-2 text-muted-foreground"}`}>{activeImpact?.sentiment ?? "Analysing"}</span></div>{newsLoading ? <p className="mt-4 text-sm text-muted-foreground">Analysing latest news…</p> : activeImpact ? <div className="mt-4 space-y-3"><p className="text-sm font-semibold">{activeImpact.headline ?? "Latest relevant market news"}</p><p className="text-sm leading-6 text-muted-foreground">{activeImpact.reason ?? "The news impact is being evaluated from available market context."}</p><div className="grid grid-cols-2 gap-2 text-xs"><div className="rounded-lg bg-surface-2/60 p-2"><span className="text-muted-foreground">Event</span><b className="mt-1 block">{activeImpact.eventType ?? "—"}</b></div><div className="rounded-lg bg-surface-2/60 p-2"><span className="text-muted-foreground">Horizon</span><b className="mt-1 block">{activeImpact.horizon ?? "—"}</b></div></div></div> : <p className="mt-4 text-sm text-muted-foreground">No verified stock-specific impact available yet.</p>}</section>
-            <section className="panel p-4"><h2 className="font-bold">Research checklist</h2><div className="mt-3 space-y-2 text-sm text-muted-foreground"><p>✓ Live price & daily move</p><p>✓ Latest relevant news</p><p>✓ AI impact & confidence</p><p>✓ Portfolio context</p><p>✓ Risks and key questions</p></div></section>
+            <section className="panel p-4"><h2 className="font-bold">Research checklist</h2><div className="mt-3 space-y-2 text-sm text-muted-foreground"><p>✓ Live price & daily move</p><p>✓ Latest relevant news</p><p>✓ AI impact & confidence</p><p>✓ Risks and key questions</p></div></section>
             <Link to={`/stock/${symbol}`} className="flex items-center justify-between rounded-xl border border-border bg-surface-2/50 p-3 text-sm font-semibold hover:border-primary/50"><span>Open full stock page</span><ChevronRight className="h-4 w-4" /></Link>
           </aside>
         </div>
