@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { ArrowLeft, Bot, BrainCircuit, ChevronRight, Search, SendHorizonal, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bot, BrainCircuit, ChevronRight, Newspaper, Search, SendHorizonal, ShieldCheck, Sparkles, TrendingUp } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { askAi } from "@/lib/ai.functions";
@@ -11,6 +11,14 @@ import { num, signed, stripSuffix } from "@/lib/market-types";
 
 type Message = { id: string; role: "user" | "assistant"; content: string };
 type Impact = { symbol?: string; sentiment?: string; impactScore?: number; impactLevel?: string; horizon?: string; confidence?: number; eventType?: string; reason?: string; headline?: string };
+
+const QUICK_STOCKS = [
+  { symbol: "RELIANCE.NS", label: "Reliance" },
+  { symbol: "TCS.NS", label: "TCS" },
+  { symbol: "INFY.NS", label: "Infosys" },
+  { symbol: "HDFCBANK.NS", label: "HDFC Bank" },
+  { symbol: "ICICIBANK.NS", label: "ICICI Bank" },
+];
 
 function impactTone(value: string | undefined) {
   const v = (value ?? "").toLowerCase();
@@ -37,6 +45,13 @@ export function AiResearcher() {
   const { data: searchResults = [] } = useQuery({ ...searchQuery(search), enabled: search.trim().length >= 2 });
 
   const activeImpact = (newsImpact as Impact[])[0];
+  const selectStock = (nextSymbol: string) => {
+    setSymbol(nextSymbol);
+    setSearch("");
+    setMessages([]);
+    setInput("");
+  };
+
   const send = async (text: string) => {
     const prompt = text.trim();
     if (!prompt || pending || !symbol) return;
@@ -64,21 +79,43 @@ export function AiResearcher() {
           <div className="relative hidden w-full max-w-sm sm:block">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search a stock to research…" className="h-10 rounded-xl pl-9" />
-            {search.trim() && searchResults.length > 0 && <div className="absolute top-12 z-50 w-full overflow-hidden rounded-xl border border-border bg-background shadow-2xl">{searchResults.slice(0, 6).map((item) => <button key={item.symbol} type="button" onClick={() => { setSymbol(item.symbol); setSearch(""); setMessages([]); }} className="flex w-full items-center justify-between px-3 py-2.5 text-left hover:bg-surface-2"><span><span className="block text-sm font-semibold">{item.name}</span><span className="text-[11px] text-muted-foreground">{stripSuffix(item.symbol)}</span></span><ChevronRight className="h-4 w-4 text-muted-foreground" /></button>)}</div>}
+            {search.trim() && searchResults.length > 0 && <div className="absolute top-12 z-50 w-full overflow-hidden rounded-xl border border-border bg-background shadow-2xl">{searchResults.slice(0, 6).map((item) => <button key={item.symbol} type="button" onClick={() => selectStock(item.symbol)} className="flex w-full items-center justify-between px-3 py-2.5 text-left hover:bg-surface-2"><span><span className="block text-sm font-semibold">{item.name}</span><span className="text-[11px] text-muted-foreground">{stripSuffix(item.symbol)}</span></span><ChevronRight className="h-4 w-4 text-muted-foreground" /></button>)}</div>}
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl space-y-4 px-4 py-5 sm:px-6 sm:py-6">
+      <main className="mx-auto max-w-7xl px-4 py-5 sm:px-6 sm:py-7">
         {!symbol ? (
-          <section className="flex min-h-[70vh] items-center justify-center rounded-2xl border border-border bg-surface-1 p-6 text-center">
-            <div className="max-w-lg">
-              <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-primary/15 text-primary"><BrainCircuit className="h-7 w-7" /></span>
-              <p className="mt-5 text-xs font-semibold uppercase tracking-widest text-primary">Research workspace</p>
-              <h2 className="mt-2 text-3xl font-black">Choose a stock to start</h2>
-              <p className="mt-2 text-sm leading-6 text-muted-foreground">Search for a company or NSE symbol above. AI Researcher will only load live price, news and impact analysis after you select a stock.</p>
-              <div className="mt-5 flex flex-wrap justify-center gap-2 text-xs text-muted-foreground"><span className="rounded-full border border-border px-3 py-1.5">Live quote</span><span className="rounded-full border border-border px-3 py-1.5">News impact</span><span className="rounded-full border border-border px-3 py-1.5">AI research</span></div>
+          <section className="relative overflow-hidden rounded-3xl border border-border bg-surface-1 px-5 py-8 shadow-2xl sm:px-10 sm:py-12 lg:px-16 lg:py-14">
+            <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-primary/10 blur-3xl" />
+            <div className="pointer-events-none absolute -bottom-32 -left-20 h-72 w-72 rounded-full bg-cyan-500/5 blur-3xl" />
+            <div className="relative mx-auto max-w-4xl text-center">
+              <div className="mx-auto grid h-16 w-16 place-items-center rounded-2xl border border-primary/25 bg-primary/10 text-primary shadow-lg shadow-primary/5"><BrainCircuit className="h-8 w-8" /></div>
+              <p className="mt-6 text-xs font-bold uppercase tracking-[0.22em] text-primary">AI-powered stock research</p>
+              <h2 className="mt-3 text-3xl font-black tracking-tight sm:text-5xl">Research any Indian stock<br className="hidden sm:block" /> in one conversation.</h2>
+              <p className="mx-auto mt-4 max-w-2xl text-sm leading-6 text-muted-foreground sm:text-base">Get live price context, relevant market news, AI impact analysis, risks and clear explanations — all in one research workspace.</p>
+
+              <div className="relative mx-auto mt-8 max-w-2xl text-left">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-5 w-5 -translate-y-1/2 text-muted-foreground" />
+                <Input autoFocus value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search company name or NSE symbol…" className="h-14 rounded-2xl border-primary/30 bg-background/80 pl-12 pr-4 text-base shadow-xl focus-visible:ring-primary/30" aria-label="Search a stock to research" />
+                {search.trim() && searchResults.length > 0 && <div className="absolute left-0 right-0 top-[62px] z-50 overflow-hidden rounded-2xl border border-border bg-background shadow-2xl">{searchResults.slice(0, 6).map((item) => <button key={item.symbol} type="button" onClick={() => selectStock(item.symbol)} className="flex w-full items-center justify-between px-4 py-3 text-left hover:bg-surface-2"><span><span className="block font-semibold">{item.name}</span><span className="text-xs text-muted-foreground">{stripSuffix(item.symbol)} · NSE</span></span><ArrowRight className="h-4 w-4 text-muted-foreground" /></button>)}</div>}
+              </div>
+
+              <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+                <span className="mr-1 text-xs text-muted-foreground">Popular research:</span>
+                {QUICK_STOCKS.map((stock) => <button key={stock.symbol} type="button" onClick={() => selectStock(stock.symbol)} className="rounded-full border border-border bg-surface-2/60 px-3.5 py-1.5 text-xs font-semibold transition hover:border-primary/50 hover:bg-primary/10 hover:text-primary">{stock.label}</button>)}
+              </div>
             </div>
+
+            <div className="relative mx-auto mt-12 grid max-w-5xl gap-3 sm:grid-cols-3">
+              {[
+                { icon: TrendingUp, title: "Live market context", text: "Price, daily move and current market state." },
+                { icon: Newspaper, title: "News that matters", text: "Relevant headlines with stock-specific impact." },
+                { icon: ShieldCheck, title: "Research with context", text: "AI explanations, risks, horizon and confidence." },
+              ].map(({ icon: Icon, title, text }) => <div key={title} className="rounded-2xl border border-border bg-background/35 p-4 text-left"><span className="grid h-9 w-9 place-items-center rounded-xl bg-primary/10 text-primary"><Icon className="h-4 w-4" /></span><h3 className="mt-3 text-sm font-bold">{title}</h3><p className="mt-1 text-xs leading-5 text-muted-foreground">{text}</p></div>)}
+            </div>
+
+            <div className="relative mx-auto mt-8 flex max-w-5xl flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-muted-foreground"><span className="flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5 text-primary" /> Ask questions in plain English</span><span className="hidden h-1 w-1 rounded-full bg-border sm:block" /><span>Built for NSE stocks</span><span className="hidden h-1 w-1 rounded-full bg-border sm:block" /><span>Research, not guaranteed predictions</span></div>
           </section>
         ) : (
           <>
@@ -95,7 +132,7 @@ export function AiResearcher() {
               </div>
             </section>
 
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,.65fr)]">
+            <div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(320px,.65fr)]">
               <section className="panel flex min-h-[560px] flex-col p-4 sm:p-5">
                 <header className="flex items-center gap-3 border-b border-border pb-4"><span className="grid h-9 w-9 place-items-center rounded-xl bg-primary/15 text-primary"><Bot className="h-5 w-5" /></span><div><h2 className="font-bold">Ask AI Researcher</h2><p className="text-xs text-muted-foreground">Answers are grounded in live quote and verified news context.</p></div><Sparkles className="ml-auto h-4 w-4 text-primary" /></header>
                 <div className="flex-1 space-y-3 overflow-y-auto py-4" aria-live="polite">
