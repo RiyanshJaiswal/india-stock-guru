@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { askAi } from "@/lib/ai.functions";
+import { getAiNewsContext } from "@/lib/ai-news-context.server";
 import { quotesQuery } from "@/lib/market-queries";
 import { num, signed, stripSuffix, type Quote } from "@/lib/market-types";
 
@@ -42,7 +43,13 @@ function localReply(prompt: string, symbol: string, quote: Quote | null | undefi
 
 export function AiAssistant({ activeSymbol, activeQuote, portfolioPositions = [] }: Props) {
   const { data: portfolioQuotes } = useQuery(quotesQuery(portfolioPositions.map((p) => p.symbol)));
-  const [messages, setMessages] = useState<Message[]>([{ id: "seed", role: "assistant", content: `I'm tracking ${stripSuffix(activeSymbol)} and your portfolio context. Ask me about the current price, today's move, risk, or P&L.` }]);
+  const { data: newsImpact = [] } = useQuery({
+    queryKey: ["ai-news-impact", activeSymbol],
+    queryFn: () => getAiNewsContext(activeSymbol),
+    staleTime: 2 * 60_000,
+    refetchOnWindowFocus: false,
+  });
+  const [messages, setMessages] = useState<Message[]>([{ id: "seed", role: "assistant", content: `I'm tracking ${stripSuffix(activeSymbol)} and your portfolio context. Ask me about the current price, today's move, risk, P&L, or what the latest news could mean for this stock.` }]);
   const [input, setInput] = useState("");
   const [pending, setPending] = useState(false);
   const [selectedSummary, setSelectedSummary] = useState<string | null>(null);
@@ -58,7 +65,7 @@ export function AiAssistant({ activeSymbol, activeQuote, portfolioPositions = []
     const hdfcInvested = rows.find((row) => stripSuffix(row.symbol) === "HDFCBANK")?.invested ?? 0;
     return { invested, current, pnl: current === null ? null : current - invested, bankWeight: invested > 0 ? (hdfcInvested / invested) * 100 : 0 };
   }, [portfolioPositions, portfolioQuotes]);
-  const suggestions = useMemo(() => [`${stripSuffix(activeSymbol)} today: what matters?`, "Is my portfolio too banking-heavy?", "Analyse my portfolio P&L"], [activeSymbol]);
+  const suggestions = useMemo(() => [`${stripSuffix(activeSymbol)} today: what matters?`, `What does the latest news mean for ${stripSuffix(activeSymbol)}?`, "Is my portfolio too banking-heavy?", "Analyse my portfolio P&L"], [activeSymbol]);
   const send = async (text: string) => {
     const prompt = text.trim();
     if (!prompt || pending) return;
@@ -66,7 +73,7 @@ export function AiAssistant({ activeSymbol, activeQuote, portfolioPositions = []
     const history = messages.slice(-10);
     setMessages((prev) => [...prev, userMessage]); setInput(""); setPending(true);
     try {
-      const result = await askAi({ data: { symbol: activeSymbol, userMessage: prompt, messages: history, context: { quote: activeQuote, portfolio, screen: "market-dashboard" } } });
+      const result = await askAi({ data: { symbol: activeSymbol, userMessage: prompt, messages: history, context: { quote: activeQuote, portfolio, newsImpact, screen: "market-dashboard" } } });
       const content = result.content || localReply(prompt, activeSymbol, activeQuote, portfolio);
       setMessages((prev) => [...prev, { id: `${Date.now()}-a`, role: "assistant", content }]);
     } catch {
@@ -105,7 +112,7 @@ export function AiAssistant({ activeSymbol, activeQuote, portfolioPositions = []
         <div className="mt-3 flex flex-wrap gap-1.5">{suggestions.map((suggestion) => <button key={suggestion} type="button" disabled={pending} onClick={() => void send(suggestion)} className="rounded-full border border-border bg-surface-2/70 px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:opacity-50">{suggestion}</button>)}</div>
         <form className="mt-3 flex items-center gap-2" onSubmit={(event) => { event.preventDefault(); void send(input); }}>
           <label htmlFor="ai-input" className="sr-only">Ask the AI assistant</label>
-          <Input id="ai-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={`Ask about ${stripSuffix(activeSymbol)}, your portfolio or P&L…`} className="h-10 rounded-xl border-border bg-surface-2/70 text-sm" disabled={pending} />
+          <Input id="ai-input" value={input} onChange={(event) => setInput(event.target.value)} placeholder={`Ask about ${stripSuffix(activeSymbol)}, news, your portfolio or P&L…`} className="h-10 rounded-xl border-border bg-surface-2/70 text-sm" disabled={pending} />
           <Button type="submit" size="icon" disabled={pending || !input.trim()} className="h-10 w-10 shrink-0 rounded-xl"><SendHorizonal className="h-4 w-4" /><span className="sr-only">Send</span></Button>
         </form>
       </section>
