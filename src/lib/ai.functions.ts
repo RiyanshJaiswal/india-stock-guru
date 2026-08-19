@@ -9,7 +9,7 @@ const chatInput = z.object({
   context: z.record(z.string(), z.unknown()).default({}),
 });
 
-const SYSTEM_PROMPT = `You are Dalal Desk AI, a simple Indian stock-market news assistant.
+const SYSTEM_PROMPT = `You are Dalal Desk AI, a simple Indian stock-market research assistant.
 Your job is to answer the user's exact question using the supplied current market context and latest verified news. Prioritize the newest relevant information and current trend.
 Rules:
 - Give a direct answer first, then 3-6 short bullets if useful.
@@ -32,6 +32,8 @@ const MAX_REPLY_LENGTH = 3_500;
 const NEWS_TIMEOUT_MS = 2_000;
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
 const REQUEST_TIMEOUT_MS = 10_000;
+const GEMINI_RETRY_STATUS = new Set([429, 500, 502, 503, 504]);
+const GEMINI_TIMEOUT_MS = 20_000;
 
 function clampText(value: string, maxChars: number): string { return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n… (truncated)`; }
 function sanitizeContext(context: Record<string, unknown>): string { try { return clampText(JSON.stringify(context), MAX_CONTEXT_CHARS); } catch { return "{}"; } }
@@ -105,39 +107,91 @@ function extractAiContent(body: unknown): string | null {
   return typeof content === "string" && content.trim() ? content.trim() : null;
 }
 
+async function callGeminiDirect(model: string, apiKey: string, prompt: string): Promise<string | null> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: { temperature: 0.1, maxOutputTokens: 1200 },
+  };
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetchWithTimeout(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify(body),
+      }, GEMINI_TIMEOUT_MS);
+      if (response.ok) {
+        const json = await response.json() as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+        const text = json.candidates?.[0]?.content?.parts?.map((part) => part.text ?? "").join("").trim();
+        return text || null;
+      }
+      if (!GEMINI_RETRY_STATUS.has(response.status) || attempt === 2) {
+        console.error(`Gemini direct request failed (${response.status})`);
+        return null;
+      }
+      await sleep(retryDelay(response, attempt));
+    } catch (error) {
+      if (attempt === 2) {
+        console.error(error instanceof Error && error.name === "AbortError" ? "Gemini direct request timed out" : "Gemini direct request failed");
+        return null;
+      }
+      await sleep(500 * (attempt + 1));
+    }
+  }
+  return null;
+}
+
 export const askAi = createServerFn({ method: "POST" })
   .inputValidator((data: unknown) => chatInput.parse(data))
   .handler(async ({ data }) => {
-    const apiKey = process.env.AI_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
-    const baseUrl = (process.env.AI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
-    const model = process.env.AI_MODEL?.trim() || process.env.OPENAI_MODEL?.trim();
-    if (!apiKey || !model) return { mode: "local" as const, content: "" };
+    const apiKey = process.env.AI_API_KEY?.trim() || process.env.GEMINI_API_KEY?.trim();
+    const configuredBaseUrl = process.env.AI_BASE_URL?.trim() || "";
+    const configuredModel = process.env.AI_MODEL?.trim() || process.env.GEMINI_MODEL?.trim() || "gemini-2.5-pro";
+    if (!apiKey) return { mode: "local" as const, content: "" };
 
     const screenContext = `Current market context:\n${sanitizeContext({ symbol: data.symbol, ...data.context })}`;
     const history = data.messages.slice(-MAX_HISTORY_MESSAGES).map((message) => ({ role: message.role, content: clampText(message.content, MAX_HISTORY_MESSAGE_CHARS) }));
 
-    // Latest-news lookup is intentionally short and non-blocking. Cached news is used immediately.
     const newsPromise = fetchLatestNews(data.symbol);
     const newsBrief = await withTimeout(newsPromise, NEWS_TIMEOUT_MS);
     const newsContext = newsBrief ? `\n\nLatest verified news (recent):\n${newsBrief}` : "\n\nLatest verified news: temporarily unavailable. Do not guess.";
+    const prompt = `${SYSTEM_PROMPT}\n\n${screenContext}${newsContext}\n\nConversation so far:\n${history.map((m) => `${m.role}: ${m.content}`).join("\n")}\n\nUser question: ${data.userMessage}`;
 
-    try {
-      const response = await callChatCompletions(baseUrl, apiKey, {
-        model,
-        temperature: 0.1,
-        max_tokens: 700,
-        messages: [
-          { role: "system", content: `${SYSTEM_PROMPT}\n\n${screenContext}${newsContext}` },
-          ...history,
-          { role: "user", content: data.userMessage },
-        ],
-      });
-      if (!response || !response.ok) { if (response) console.error(`AI provider request failed (${response.status})`); return { mode: "local" as const, content: "" }; }
-      let body: unknown;
-      try { body = await response.json(); } catch { console.error("AI provider returned a non-JSON response body"); return { mode: "local" as const, content: "" }; }
-      const rawContent = extractAiContent(body);
-      if (!rawContent) { console.error("AI provider returned an invalid or empty completion"); return { mode: "local" as const, content: "" }; }
-      const content = rawContent.length > MAX_REPLY_LENGTH ? `${rawContent.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)` : rawContent;
-      return { mode: "ai" as const, content };
-    } catch { return { mode: "local" as const, content: "" }; }
+    // When configured for Google's native Gemini endpoint, use Gemini's native generateContent API directly.
+    // This matches the tested PowerShell flow and avoids OpenAI-compatible proxy mismatches.
+    if (configuredBaseUrl.includes("generativelanguage.googleapis.com")) {
+      const content = await callGeminiDirect(configuredModel, apiKey, prompt);
+      if (content) {
+        const bounded = content.length > MAX_REPLY_LENGTH ? `${content.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)` : content;
+        return { mode: "ai" as const, content: bounded };
+      }
+      return { mode: "local" as const, content: "" };
+    }
+
+    if (!configuredBaseUrl || configuredBaseUrl.includes("api.openai.com")) {
+      const content = await callGeminiDirect(configuredModel, apiKey, prompt);
+      if (content) {
+        const bounded = content.length > MAX_REPLY_LENGTH ? `${content.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)` : content;
+        return { mode: "ai" as const, content: bounded };
+      }
+    }
+
+    const response = await callChatCompletions(configuredBaseUrl || "https://api.openai.com/v1", apiKey, {
+      model: configuredModel,
+      temperature: 0.1,
+      max_tokens: 700,
+      messages: [
+        { role: "system", content: `${SYSTEM_PROMPT}\n\n${screenContext}${newsContext}` },
+        ...history,
+        { role: "user", content: data.userMessage },
+      ],
+    });
+    if (!response || !response.ok) { if (response) console.error(`AI provider request failed (${response.status})`); return { mode: "local" as const, content: "" }; }
+    let body: unknown;
+    try { body = await response.json(); } catch { console.error("AI provider returned a non-JSON response body"); return { mode: "local" as const, content: "" }; }
+    const rawContent = extractAiContent(body);
+    if (!rawContent) { console.error("AI provider returned an invalid or empty completion"); return { mode: "local" as const, content: "" }; }
+    const content = rawContent.length > MAX_REPLY_LENGTH ? `${rawContent.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)` : rawContent;
+    return { mode: "ai" as const, content };
   });
