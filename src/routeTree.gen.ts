@@ -11,6 +11,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as NewsRouteImport } from './routes/news'
 import { Route as StockSymbolRouteImport } from './routes/stock.$symbol'
+import { Route as AiResearcherRouteImport } from './routes/ai-researcher'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -27,35 +28,44 @@ const StockSymbolRoute = StockSymbolRouteImport.update({
   path: '/stock/$symbol',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AiResearcherRoute = AiResearcherRouteImport.update({
+  id: '/ai-researcher',
+  path: '/ai-researcher',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/news': typeof NewsRoute
   '/stock/$symbol': typeof StockSymbolRoute
+  '/ai-researcher': typeof AiResearcherRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/news': typeof NewsRoute
   '/stock/$symbol': typeof StockSymbolRoute
+  '/ai-researcher': typeof AiResearcherRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/news': typeof NewsRoute
   '/stock/$symbol': typeof StockSymbolRoute
+  '/ai-researcher': typeof AiResearcherRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/news' | '/stock/$symbol'
+  fullPaths: '/' | '/news' | '/stock/$symbol' | '/ai-researcher'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/news' | '/stock/$symbol'
-  id: '__root__' | '/' | '/news' | '/stock/$symbol'
+  to: '/' | '/news' | '/stock/$symbol' | '/ai-researcher'
+  id: '__root__' | '/' | '/news' | '/stock/$symbol' | '/ai-researcher'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   NewsRoute: typeof NewsRoute
   StockSymbolRoute: typeof StockSymbolRoute
+  AiResearcherRoute: typeof AiResearcherRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -81,6 +91,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof StockSymbolRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/ai-researcher': {
+      id: '/ai-researcher'
+      path: '/ai-researcher'
+      fullPath: '/ai-researcher'
+      preLoaderRoute: typeof AiResearcherRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -88,6 +105,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   NewsRoute: NewsRoute,
   StockSymbolRoute: StockSymbolRoute,
+  AiResearcherRoute: AiResearcherRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
