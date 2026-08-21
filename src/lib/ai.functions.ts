@@ -36,7 +36,9 @@ const MAX_HISTORY_MESSAGE_CHARS = 1_500;
 const MAX_REPLY_LENGTH = 5_000;
 const NEWS_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 25_000;
-const VERIFIED_MODEL = "gemini-2.5-flash";
+// Gemini 2.5 Flash is unavailable to new users on the current API surface.
+// Gemini 3.6 Flash is the current GA replacement and supports GenerateContent.
+const VERIFIED_MODEL = "gemini-3.6-flash";
 
 function clampText(value: string, maxChars: number): string { return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n… (truncated)`; }
 function sanitizeContext(context: Record<string, unknown>): string { try { return clampText(JSON.stringify(context), MAX_CONTEXT_CHARS); } catch { return "{}"; } }
@@ -108,10 +110,7 @@ async function callGeminiNative(apiKey: string, prompt: string): Promise<string 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${VERIFIED_MODEL}:generateContent`;
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      maxOutputTokens: 1800,
-      thinkingConfig: { thinkingBudget: 0 },
-    },
+    generationConfig: { maxOutputTokens: 1800 },
   };
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -127,7 +126,6 @@ async function callGeminiNative(apiKey: string, prompt: string): Promise<string 
         const result = extractGeminiContent(json);
         if (result.text) return result.text;
         console.error("Gemini returned no text", JSON.stringify({ finishReason: result.finishReason, finishMessage: result.finishMessage, blockReason: result.blockReason }));
-        // Retry once with a smaller prompt if the provider returned an empty candidate.
         if (attempt === 0) {
           await sleep(300);
           prompt = clampText(prompt, 9_000);
