@@ -1,12 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { AiResearcher } from "@/components/market/AiResearcher";
+import { AiResearcherPro } from "@/components/market/AiResearcherPro";
 
 export const Route = createFileRoute("/ai-researcher")({
   head: () => ({
     meta: [
       { title: "AI Researcher — Dalal Desk" },
-      { name: "description", content: "AI-powered Indian stock research with live market, portfolio and news context." },
+      { name: "description", content: "AI-powered Indian stock research with market context, news intelligence and evidence-aware analysis." },
     ],
   }),
-  component: AiResearcher,
+  component: AiResearcherPro,
 });
