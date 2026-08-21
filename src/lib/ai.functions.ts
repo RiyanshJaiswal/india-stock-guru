@@ -35,10 +35,20 @@ const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_MESSAGE_CHARS = 1_500;
 const MAX_REPLY_LENGTH = 5_000;
 const NEWS_TIMEOUT_MS = 5_000;
-const REQUEST_TIMEOUT_MS = 25_000;
-// Gemini 2.5 Flash is unavailable to new users on the current API surface.
-// Gemini 3.6 Flash is the current GA replacement and supports GenerateContent.
-const VERIFIED_MODEL = "gemini-3.6-flash";
+const REQUEST_TIMEOUT_MS = 20_000;
+
+// Ordered from strongest/current to lightweight fallback. The router skips a model
+// immediately on 404/400 and falls through on rate-limit/server/timeout failures.
+const GEMINI_MODELS = [
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-3-flash-preview",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+  "gemini-flash-latest",
+];
 
 function clampText(value: string, maxChars: number): string { return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n… (truncated)`; }
 function sanitizeContext(context: Record<string, unknown>): string { try { return clampText(JSON.stringify(context), MAX_CONTEXT_CHARS); } catch { return "{}"; } }
@@ -106,41 +116,42 @@ function buildPrompt(symbol: string, userMessage: string, history: Array<{ role:
   return `${SYSTEM_PROMPT}\n\nStock symbol: ${symbol}\n\nCurrent application evidence:\n${sanitizeContext(context)}\n\n${newsContext || "Latest verified news: temporarily unavailable. Do not guess."}\n\nConversation so far:\n${history.map((m) => `${m.role}: ${m.content}`).join("\n")}\n\nUser question:\n${userMessage}`;
 }
 
-async function callGeminiNative(apiKey: string, prompt: string): Promise<string | null> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${VERIFIED_MODEL}:generateContent`;
-  const body = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: { maxOutputTokens: 1800 },
-  };
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const response = await fetchWithTimeout(url, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-        body: JSON.stringify(body),
-      }, REQUEST_TIMEOUT_MS);
-      const raw = await response.text();
-      if (response.ok) {
-        let json: unknown;
-        try { json = JSON.parse(raw); } catch { json = null; }
-        const result = extractGeminiContent(json);
-        if (result.text) return result.text;
-        console.error("Gemini returned no text", JSON.stringify({ finishReason: result.finishReason, finishMessage: result.finishMessage, blockReason: result.blockReason }));
-        if (attempt === 0) {
-          await sleep(300);
-          prompt = clampText(prompt, 9_000);
-          continue;
-        }
-        return null;
-      }
-      console.error(`Gemini HTTP ${response.status} for ${VERIFIED_MODEL}: ${raw.slice(0, 1200)}`);
-      if (![408, 429, 500, 502, 503, 504].includes(response.status) || attempt === 1) return null;
-      await sleep(700 * (attempt + 1));
-    } catch (error) {
-      console.error(`Gemini request error: ${error instanceof Error ? error.message : String(error)}`);
-      if (attempt === 1) return null;
-      await sleep(700);
+async function callGeminiModel(apiKey: string, model: string, prompt: string): Promise<{ text: string | null; retryable: boolean }> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
+  const body = { contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { maxOutputTokens: 1800 } };
+  try {
+    const response = await fetchWithTimeout(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify(body),
+    }, REQUEST_TIMEOUT_MS);
+    const raw = await response.text();
+    if (!response.ok) {
+      console.error(`Gemini ${model} HTTP ${response.status}: ${raw.slice(0, 800)}`);
+      return { text: null, retryable: [408, 409, 429, 500, 502, 503, 504].includes(response.status) };
     }
+    let json: unknown;
+    try { json = JSON.parse(raw); } catch { return { text: null, retryable: true }; }
+    const result = extractGeminiContent(json);
+    if (result.text) return { text: result.text, retryable: false };
+    console.error(`Gemini ${model} returned no text`, JSON.stringify({ finishReason: result.finishReason, finishMessage: result.finishMessage, blockReason: result.blockReason }));
+    return { text: null, retryable: true };
+  } catch (error) {
+    console.error(`Gemini ${model} request error: ${error instanceof Error ? error.message : String(error)}`);
+    return { text: null, retryable: true };
+  }
+}
+
+async function callGeminiWithFallback(apiKey: string, prompt: string): Promise<string | null> {
+  for (const model of GEMINI_MODELS) {
+    const result = await callGeminiModel(apiKey, model, prompt);
+    if (result.text) {
+      console.info(`Gemini response served by ${model}`);
+      return result.text;
+    }
+    // For an unavailable/invalid model, move on immediately. For transient errors,
+    // also move on so the user gets a response instead of waiting through retries.
+    await sleep(150);
   }
   return null;
 }
@@ -155,7 +166,7 @@ export const askAi = createServerFn({ method: "POST" })
     const newsBrief = await withTimeout(fetchLatestNews(data.symbol), NEWS_TIMEOUT_MS);
     const newsContext = newsBrief ? `Latest verified news:\n${newsBrief}` : "Latest verified news: temporarily unavailable.";
     const prompt = buildPrompt(data.symbol, data.userMessage, history, { symbol: data.symbol, ...data.context }, newsContext);
-    const content = await callGeminiNative(apiKey, prompt);
+    const content = await callGeminiWithFallback(apiKey, prompt);
     if (content) return { mode: "ai" as const, content: content.length > MAX_REPLY_LENGTH ? `${content.slice(0, MAX_REPLY_LENGTH)}\n\n… (response truncated)` : content };
-    return { mode: "local" as const, content: "## AI Research temporarily unavailable\n\nGemini did not return a response. Your live market data is still available." };
+    return { mode: "local" as const, content: "## AI Research temporarily unavailable\n\nAll configured Gemini models failed to return a response. Your live market data is still available." };
   });
