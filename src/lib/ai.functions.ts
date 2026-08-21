@@ -29,15 +29,13 @@ Formatting rules:
 
 const NEWS_CACHE_TTL_MS = 5 * 60_000;
 const newsBriefCache = new Map<string, { value: string; expiresAt: number }>();
-const MAX_CONTEXT_CHARS = 20_000;
-const MAX_NEWS_CHARS = 8_000;
+const MAX_CONTEXT_CHARS = 14_000;
+const MAX_NEWS_CHARS = 6_000;
 const MAX_HISTORY_MESSAGES = 6;
-const MAX_HISTORY_MESSAGE_CHARS = 2_000;
+const MAX_HISTORY_MESSAGE_CHARS = 1_500;
 const MAX_REPLY_LENGTH = 5_000;
 const NEWS_TIMEOUT_MS = 5_000;
 const REQUEST_TIMEOUT_MS = 25_000;
-// Stable model: Google documents this as the 2.5 Flash endpoint and recommends
-// specific stable model IDs for production rather than a moving "latest" alias.
 const VERIFIED_MODEL = "gemini-2.5-flash";
 
 function clampText(value: string, maxChars: number): string { return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n… (truncated)`; }
@@ -85,17 +83,21 @@ async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: numbe
   try { return await fetch(url, { ...init, signal: controller.signal }); } finally { clearTimeout(timeout); }
 }
 
-function extractGeminiContent(body: unknown): string | null {
-  if (!body || typeof body !== "object") return null;
-  const candidates = (body as { candidates?: unknown }).candidates;
-  if (!Array.isArray(candidates) || !candidates.length) return null;
-  const first = candidates[0] as { content?: unknown; finishReason?: unknown; text?: unknown };
-  if (typeof first.text === "string" && first.text.trim()) return first.text.trim();
+function extractGeminiContent(body: unknown): { text: string | null; finishReason?: string; finishMessage?: string; blockReason?: string } {
+  if (!body || typeof body !== "object") return { text: null };
+  const root = body as { candidates?: unknown; promptFeedback?: { blockReason?: unknown } };
+  const candidates = root.candidates;
+  const blockReason = typeof root.promptFeedback?.blockReason === "string" ? root.promptFeedback.blockReason : undefined;
+  if (!Array.isArray(candidates) || !candidates.length) return { text: null, blockReason };
+  const first = candidates[0] as { content?: unknown; finishReason?: unknown; finishMessage?: unknown; text?: unknown };
+  const finishReason = typeof first.finishReason === "string" ? first.finishReason : undefined;
+  const finishMessage = typeof first.finishMessage === "string" ? first.finishMessage : undefined;
+  if (typeof first.text === "string" && first.text.trim()) return { text: first.text.trim(), finishReason, finishMessage, blockReason };
   const content = first.content;
   const parts = content && typeof content === "object" ? (content as { parts?: unknown }).parts : null;
-  if (!Array.isArray(parts)) return null;
+  if (!Array.isArray(parts)) return { text: null, finishReason, finishMessage, blockReason };
   const text = parts.map((part) => part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "").join("").trim();
-  return text || null;
+  return { text: text || null, finishReason, finishMessage, blockReason };
 }
 
 function buildPrompt(symbol: string, userMessage: string, history: Array<{ role: string; content: string }>, context: Record<string, unknown>, newsContext: string): string {
@@ -106,7 +108,10 @@ async function callGeminiNative(apiKey: string, prompt: string): Promise<string 
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${VERIFIED_MODEL}:generateContent`;
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: { maxOutputTokens: 2200 },
+    generationConfig: {
+      maxOutputTokens: 1800,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
   };
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -115,14 +120,22 @@ async function callGeminiNative(apiKey: string, prompt: string): Promise<string 
         headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
         body: JSON.stringify(body),
       }, REQUEST_TIMEOUT_MS);
+      const raw = await response.text();
       if (response.ok) {
-        const json = await response.json();
-        const content = extractGeminiContent(json);
-        if (!content) console.error("Gemini returned no text content", JSON.stringify(json).slice(0, 1200));
-        return content;
+        let json: unknown;
+        try { json = JSON.parse(raw); } catch { json = null; }
+        const result = extractGeminiContent(json);
+        if (result.text) return result.text;
+        console.error("Gemini returned no text", JSON.stringify({ finishReason: result.finishReason, finishMessage: result.finishMessage, blockReason: result.blockReason }));
+        // Retry once with a smaller prompt if the provider returned an empty candidate.
+        if (attempt === 0) {
+          await sleep(300);
+          prompt = clampText(prompt, 9_000);
+          continue;
+        }
+        return null;
       }
-      const errorBody = await response.text();
-      console.error(`Gemini HTTP ${response.status} for ${VERIFIED_MODEL}: ${errorBody.slice(0, 1200)}`);
+      console.error(`Gemini HTTP ${response.status} for ${VERIFIED_MODEL}: ${raw.slice(0, 1200)}`);
       if (![408, 429, 500, 502, 503, 504].includes(response.status) || attempt === 1) return null;
       await sleep(700 * (attempt + 1));
     } catch (error) {
