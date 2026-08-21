@@ -35,8 +35,10 @@ const MAX_HISTORY_MESSAGES = 6;
 const MAX_HISTORY_MESSAGE_CHARS = 2_000;
 const MAX_REPLY_LENGTH = 5_000;
 const NEWS_TIMEOUT_MS = 5_000;
-const REQUEST_TIMEOUT_MS = 30_000;
-const VERIFIED_MODEL = "gemini-flash-latest";
+const REQUEST_TIMEOUT_MS = 25_000;
+// Stable model: Google documents this as the 2.5 Flash endpoint and recommends
+// specific stable model IDs for production rather than a moving "latest" alias.
+const VERIFIED_MODEL = "gemini-2.5-flash";
 
 function clampText(value: string, maxChars: number): string { return value.length <= maxChars ? value : `${value.slice(0, maxChars)}\n… (truncated)`; }
 function sanitizeContext(context: Record<string, unknown>): string { try { return clampText(JSON.stringify(context), MAX_CONTEXT_CHARS); } catch { return "{}"; } }
@@ -87,7 +89,9 @@ function extractGeminiContent(body: unknown): string | null {
   if (!body || typeof body !== "object") return null;
   const candidates = (body as { candidates?: unknown }).candidates;
   if (!Array.isArray(candidates) || !candidates.length) return null;
-  const content = (candidates[0] as { content?: unknown })?.content;
+  const first = candidates[0] as { content?: unknown; finishReason?: unknown; text?: unknown };
+  if (typeof first.text === "string" && first.text.trim()) return first.text.trim();
+  const content = first.content;
   const parts = content && typeof content === "object" ? (content as { parts?: unknown }).parts : null;
   if (!Array.isArray(parts)) return null;
   const text = parts.map((part) => part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string" ? (part as { text: string }).text : "").join("").trim();
@@ -99,15 +103,33 @@ function buildPrompt(symbol: string, userMessage: string, history: Array<{ role:
 }
 
 async function callGeminiNative(apiKey: string, prompt: string): Promise<string | null> {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(VERIFIED_MODEL)}:generateContent`;
-  const body = { contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig: { temperature: 0.15, maxOutputTokens: 2200 } };
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${VERIFIED_MODEL}:generateContent`;
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: { maxOutputTokens: 2200 },
+  };
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const response = await fetchWithTimeout(url, { method: "POST", headers: { "content-type": "application/json", "x-goog-api-key": apiKey }, body: JSON.stringify(body) }, REQUEST_TIMEOUT_MS);
-      if (response.ok) return extractGeminiContent(await response.json());
+      const response = await fetchWithTimeout(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+        body: JSON.stringify(body),
+      }, REQUEST_TIMEOUT_MS);
+      if (response.ok) {
+        const json = await response.json();
+        const content = extractGeminiContent(json);
+        if (!content) console.error("Gemini returned no text content", JSON.stringify(json).slice(0, 1200));
+        return content;
+      }
+      const errorBody = await response.text();
+      console.error(`Gemini HTTP ${response.status} for ${VERIFIED_MODEL}: ${errorBody.slice(0, 1200)}`);
       if (![408, 429, 500, 502, 503, 504].includes(response.status) || attempt === 1) return null;
       await sleep(700 * (attempt + 1));
-    } catch { if (attempt === 1) return null; await sleep(700); }
+    } catch (error) {
+      console.error(`Gemini request error: ${error instanceof Error ? error.message : String(error)}`);
+      if (attempt === 1) return null;
+      await sleep(700);
+    }
   }
   return null;
 }
