@@ -16,13 +16,13 @@ import { quoteQuery } from "@/lib/market-queries";
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
-      { title: "Dalal Desk — AI Indian Stock Market Dashboard" },
+      { title: "Indian Stocks — AI Indian Stock Market Dashboard" },
       {
         name: "description",
         content:
           "Search every NSE and BSE listed stock, track your watchlist, portfolio P&L, market news and AI research in one dark dashboard.",
       },
-      { property: "og:title", content: "Dalal Desk — AI Indian Stock Market Dashboard" },
+      { property: "og:title", content: "Indian Stocks — AI Indian Stock Market Dashboard" },
       {
         property: "og:description",
         content:
@@ -55,7 +55,7 @@ function Dashboard() {
               <Activity className="h-5 w-5" />
             </span>
             <div className="min-w-0">
-              <h1 className="truncate text-lg font-black sm:text-xl">Dalal Desk</h1>
+              <h1 className="truncate text-lg font-black sm:text-xl">Indian Stocks</h1>
               <p className="truncate text-xs text-muted-foreground">NSE · BSE — AI market terminal</p>
             </div>
           </div>
