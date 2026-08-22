@@ -20,7 +20,50 @@ import type {
   ResearchRequest,
 } from "./research-types";
 
-const COLLECTOR_TIMEOUT_MS = 9_000;
+// Research uses several upstream APIs (market history + fundamentals + news).
+// 9s was too aggressive for cold provider/authentication paths and caused the
+// UI to report a context timeout even when the providers could eventually
+// return valid data. Keep a bounded timeout, but give cold starts enough room.
+const COLLECTOR_TIMEOUT_MS = 15_000;
+const CONTEXT_CACHE_TTL_MS = 60_000;
+
+type CachedContext = { expiresAt: number; result: ResearchContextResult };
+const contextCache = new Map<string, CachedContext>();
+
+function contextCacheKey(request: ResearchRequest): string {
+  return JSON.stringify({
+    symbol: request.symbol,
+    domains: [...request.domains].sort(),
+    interval: request.interval,
+    range: request.range,
+    quarters: request.quarters,
+    years: request.years,
+    newsLimit: request.newsLimit,
+    newsSinceDays: request.newsSinceDays,
+  });
+}
+
+function readContextCache(key: string): ResearchContextResult | null {
+  const cached = contextCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    contextCache.delete(key);
+    return null;
+  }
+  return cached.result;
+}
+
+function writeContextCache(key: string, result: ResearchContextResult): void {
+  // Cache only successful contexts. Failed/empty contexts should not be
+  // sticky because a transient upstream failure must be retried.
+  if (!result.ok) return;
+  contextCache.set(key, { expiresAt: Date.now() + CONTEXT_CACHE_TTL_MS, result });
+  // Keep memory bounded on long-lived Railway processes.
+  if (contextCache.size > 100) {
+    const oldest = contextCache.keys().next().value;
+    if (oldest) contextCache.delete(oldest);
+  }
+}
 
 async function collectWithTimeout(
   collector: (typeof RESEARCH_COLLECTORS)[number],
@@ -45,6 +88,10 @@ async function collectWithTimeout(
 export async function runResearchContext(
   request: ResearchRequest,
 ): Promise<ResearchContextResult> {
+  const cacheKey = contextCacheKey(request);
+  const cached = readContextCache(cacheKey);
+  if (cached) return cached;
+
   const collectors = RESEARCH_COLLECTORS.filter((collector) =>
     request.domains.includes(collector.domain),
   );
@@ -61,6 +108,8 @@ export async function runResearchContext(
     };
   }
 
+  // Keep collectors independent. A slow/failing fundamentals provider must
+  // not discard working market, technical, or news evidence.
   const parts = await Promise.all(
     collectors.map(async (collector) => {
       const startedAt = Date.now();
@@ -112,5 +161,7 @@ export async function runResearchContext(
     };
   }
 
-  return { ok: true, data: context };
+  const result: ResearchContextResult = { ok: true, data: context };
+  writeContextCache(cacheKey, result);
+  return result;
 }
