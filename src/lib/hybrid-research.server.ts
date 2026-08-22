@@ -7,6 +7,7 @@ import type { ResearchContext, ResearchEvidence } from "./research-types";
 const inputSchema = z.object({ symbol: z.string().trim().min(1).max(32) });
 const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_EVIDENCE = 42;
+const MAX_AI_ATTEMPTS = 3;
 
 type HybridAiReport = {
   executiveSummary: string;
@@ -121,7 +122,8 @@ function fallbackReport(evidence: ClientContext["evidence"]): HybridAiReport {
 
 function extractJson(text: string): HybridAiReport | null {
   try {
-    const parsed = JSON.parse(text) as Partial<HybridAiReport>;
+    const cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/\s*```$/i, "");
+    const parsed = JSON.parse(cleaned) as Partial<HybridAiReport>;
     if (typeof parsed.executiveSummary !== "string" || typeof parsed.hybridVerdict !== "string") return null;
     return {
       executiveSummary: parsed.executiveSummary,
@@ -140,10 +142,55 @@ function extractJson(text: string): HybridAiReport | null {
   }
 }
 
+function modelCandidates(baseUrl: string, primaryModel: string): string[] {
+  const configured = (process.env.AI_FALLBACK_MODELS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const isGemini = baseUrl.includes("generativelanguage.googleapis.com") || Boolean(process.env.GEMINI_API_KEY?.trim());
+  const defaults = isGemini
+    ? ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    : [];
+  return [...new Set([primaryModel, ...configured, ...defaults])].slice(0, MAX_AI_ATTEMPTS);
+}
+
+async function requestAi(
+  baseUrl: string,
+  apiKey: string,
+  model: string,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<HybridAiReport | null> {
+  try {
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model,
+        temperature: 0.1,
+        max_tokens: 1800,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "Return reliable structured financial research JSON. Never invent evidence." },
+          { role: "user", content: prompt },
+        ],
+      }),
+      signal,
+    });
+    if (!response.ok) return null;
+    const body = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
+    const content = body.choices?.[0]?.message?.content;
+    return typeof content === "string" ? extractJson(content) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function callHybridAi(symbol: string, context: ClientContext, marketNews: HybridResearchResult["marketNews"]): Promise<HybridAiReport | null> {
-  const apiKey = process.env.AI_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
-  const baseUrl = (process.env.AI_BASE_URL?.trim() || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const model = process.env.AI_MODEL?.trim() || process.env.OPENAI_MODEL?.trim();
+  const geminiKey = process.env.GEMINI_API_KEY?.trim();
+  const apiKey = process.env.AI_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim() || geminiKey;
+  const baseUrl = (process.env.AI_BASE_URL?.trim() || (geminiKey ? "https://generativelanguage.googleapis.com/v1beta/openai" : "https://api.openai.com/v1")).replace(/\/+$/, "");
+  const model = process.env.AI_MODEL?.trim() || process.env.OPENAI_MODEL?.trim() || "gemini-2.5-pro";
   if (!apiKey || !model) return null;
 
   const controller = new AbortController();
@@ -160,6 +207,7 @@ Hard rules:
 - Identify 1-3 non-obvious insights from the evidence.
 - Give a research/action framework using confirmation, support/resistance and risk controls; do not promise returns or certainty.
 - Confidence must reflect evidence quality, freshness and conflicts.
+- If a data domain is unavailable, explicitly say unavailable rather than guessing.
 - Return ONLY valid JSON with exactly these keys: executiveSummary, newsView, technicalView, fundamentalView, hybridVerdict, actionFramework, hiddenInsights, risks, watchLevels, confidence.
 - hiddenInsights, risks and watchLevels must be arrays of short strings. confidence must be an integer 0-100.
 
@@ -175,17 +223,12 @@ ${JSON.stringify(marketNews)}
 GAPS / CONFLICTS:
 ${JSON.stringify({ gaps: context.gaps, conflicts: context.conflicts })}`;
 
-    const response = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, temperature: 0.1, max_tokens: 1400, response_format: { type: "json_object" }, messages: [{ role: "system", content: "Return reliable structured financial research JSON." }, { role: "user", content: prompt }] }),
-      signal: controller.signal,
-    });
-    if (!response.ok) return null;
-    const body = await response.json() as { choices?: Array<{ message?: { content?: unknown } }> };
-    const content = body.choices?.[0]?.message?.content;
-    return typeof content === "string" ? extractJson(content) : null;
-  } catch {
+    const models = modelCandidates(baseUrl, model);
+    for (const candidate of models) {
+      if (controller.signal.aborted) break;
+      const result = await requestAi(baseUrl, apiKey, candidate, prompt, controller.signal);
+      if (result) return result;
+    }
     return null;
   } finally {
     clearTimeout(timeout);
