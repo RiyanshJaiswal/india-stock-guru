@@ -2,18 +2,27 @@
  * GeminiProvider (server-only) — Gemini models through the Lovable AI Gateway
  * OpenAI-compatible chat completions endpoint.
  *
- * Uses a model fallback chain so a temporary 429/5xx/model availability issue
- * on one Gemini model does not make the entire AI Researcher request fail.
+ * Uses a broad Gemini fallback chain so temporary rate limits, capacity,
+ * model availability or provider errors do not make AI Researcher fail.
  */
 
 import type { AIProvider, AIProviderRequest, AIProviderResponse } from "../ai-types";
 
 const ENDPOINT = "https://ai.gateway.lovable.dev/v1/chat/completions";
+
+// Text/reasoning Gemini models only. Image, TTS, Live, embedding and robotics
+// models are intentionally excluded because this provider expects text chat.
 const DEFAULT_MODELS = [
   "google/gemini-3.7-flash",
   "google/gemini-3.6-flash",
   "google/gemini-3.5-flash",
   "google/gemini-3.5-flash-lite",
+  "google/gemini-3.1-flash-lite",
+  "google/gemini-3.1-pro-preview",
+  "google/gemini-3-flash-preview",
+  "google/gemini-2.5-pro",
+  "google/gemini-2.5-flash",
+  "google/gemini-2.5-flash-lite",
 ];
 
 function apiKey(): string | undefined {
@@ -36,7 +45,7 @@ function models(): string[] {
 }
 
 function isTransientOrModelFailure(status: number): boolean {
-  return status === 404 || status === 408 || status === 409 || status === 429 || status >= 500;
+  return status === 400 || status === 404 || status === 408 || status === 409 || status === 429 || status >= 500;
 }
 
 async function complete(request: AIProviderRequest): Promise<AIProviderResponse> {
@@ -73,9 +82,8 @@ async function complete(request: AIProviderRequest): Promise<AIProviderResponse>
         const message = `AI gateway error ${response.status}: ${detail.slice(0, 220)}`;
         failures.push(`${model}: ${message}`);
 
-        // Move immediately to the next model for transient capacity/rate-limit
-        // failures and unavailable/invalid model IDs. Do not expose provider
-        // details to the user unless every fallback is exhausted.
+        // Unsupported model/schema combinations, rate limits, timeouts and
+        // server-side capacity errors fall through to the next model.
         if (isTransientOrModelFailure(response.status)) continue;
 
         throw new Error(message);
