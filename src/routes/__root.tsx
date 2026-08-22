@@ -77,14 +77,19 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Lovable App" },
-      { name: "description", content: "Lovable Generated Project" },
-      { name: "author", content: "Lovable" },
-      { property: "og:title", content: "Lovable App" },
-      { property: "og:description", content: "Lovable Generated Project" },
+      { title: "Indian Stocks — AI Indian Stock Market Dashboard" },
+      {
+        name: "description",
+        content: "Indian Stocks — AI-powered NSE/BSE stock market dashboard with live market context, news and research.",
+      },
+      { name: "author", content: "Indian Stocks" },
+      { property: "og:title", content: "Indian Stocks — AI Indian Stock Market Dashboard" },
+      {
+        property: "og:description",
+        content: "Live NSE/BSE stock search, watchlist, portfolio P&L, market news and AI research in one dashboard.",
+      },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
-      { name: "twitter:site", content: "@Lovable" },
     ],
     links: [
       { rel: "preconnect", href: "https://fonts.googleapis.com" },
